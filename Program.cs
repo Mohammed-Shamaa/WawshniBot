@@ -13,10 +13,14 @@ builder.Services.AddOptions<TelegramOptions>()
 builder.Services.AddOptions<MoodleOptions>()
     .Bind(builder.Configuration.GetSection(MoodleOptions.SectionName))
     .Validate(options => options.BaseUrl.IsAbsoluteUri && options.BaseUrl.Scheme == Uri.UriSchemeHttps, "Moodle:BaseUrl must be an absolute HTTPS URL.")
+    .Validate(options => options.LoginTimeoutSeconds is >= 15 and <= 120, "Moodle:LoginTimeoutSeconds must be between 15 and 120 seconds.")
     .Validate(options => options.ScanIntervalMinutes >= 1, "Moodle:ScanIntervalMinutes must be at least one minute.")
     .ValidateOnStart();
 builder.Services.AddSingleton<TelegramUserAuthorization>();
 builder.Services.AddSingleton<MoodleConnectionStatus>();
+builder.Services.AddSingleton<MoodleSessionCrypto>();
+builder.Services.AddSingleton<MoodleSessionRepository>();
+builder.Services.AddSingleton<MoodleBrowserService>();
 builder.Services.AddSingleton<MessageHandler>();
 builder.Services.AddSingleton<TelegramBotService>();
 builder.Services.AddSingleton<NeonDatabaseReadiness>();

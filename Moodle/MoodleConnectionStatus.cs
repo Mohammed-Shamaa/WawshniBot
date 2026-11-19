@@ -7,11 +7,14 @@ public sealed class MoodleOptions
     public const string SectionName = "Moodle";
     public Uri BaseUrl { get; set; } = new("https://moodle.iugaza.edu.ps/");
     public int ScanIntervalMinutes { get; set; } = 10;
+    public int LoginTimeoutSeconds { get; set; } = 45;
+    public string? SessionEncryptionKey { get; set; }
+    public short SessionEncryptionKeyVersion { get; set; } = 1;
+    public Dictionary<string, string> PreviousSessionEncryptionKeys { get; set; } = [];
 }
 
 /// <summary>
-/// Reports integration readiness without implying that a Moodle session or API exists.
-/// Authentication is intentionally unavailable until a secure, supported flow is implemented.
+/// Legacy read-only Moodle configuration status. Session validation is handled by MoodleBrowserService.
 /// </summary>
 public sealed class MoodleConnectionStatus(IOptions<MoodleOptions> options)
 {

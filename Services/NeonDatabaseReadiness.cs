@@ -8,6 +8,7 @@ namespace Wawshni.Bot.Services;
 public sealed class NeonDatabaseReadiness : IAsyncDisposable
 {
     private readonly NpgsqlDataSource? _dataSource;
+    public NpgsqlDataSource? DataSource => _dataSource;
     private readonly ILogger<NeonDatabaseReadiness> _logger;
 
     public NeonDatabaseReadiness(IConfiguration configuration, ILogger<NeonDatabaseReadiness> logger)

@@ -1,6 +1,6 @@
 # WawshniBot
 
-Arabic-first Telegram assistant built on .NET 10. ASP.NET Core, Telegram long polling, and Neon PostgreSQL connectivity run in one process. Moodle access and monitoring are not implemented; the bot does not fabricate course data.
+Arabic-first Telegram assistant built on .NET 10. ASP.NET Core, Telegram long polling, Neon PostgreSQL, and Playwright for short-lived Moodle browser sessions.
 
 ## Local setup
 
@@ -20,7 +20,7 @@ Never commit `.env` files or credentials. Rotate any Telegram token shared in ch
 
 The project is linked to the Neon project and `production` branch with the Neon CLI. `neon.ts` and `package.json` declare the Neon configuration; `.env.local` contains connection variables pulled by the CLI and is ignored by Git.
 
-The .NET app accepts either `ConnectionStrings__DefaultConnection` or `DATABASE_URL`. It uses Npgsql's pooled `NpgsqlDataSource`, requires TLS for PostgreSQL URLs, and runs only a read-only `SELECT 1` check at `/health/ready`. The app currently has no schema, EF Core entities, or migrations, and does not write to the database.
+The .NET app accepts either `ConnectionStrings__DefaultConnection` or `DATABASE_URL`. It uses Npgsql's pooled `NpgsqlDataSource`, requires TLS for PostgreSQL URLs, and runs a read-only `SELECT 1` check at `/health/ready`. There was no EF Core setup in the existing app, so Moodle sessions use Npgsql directly. `Moodle/001_create_moodle_sessions.sql` is an additive, idempotent schema migration; the app also runs the same `CREATE TABLE IF NOT EXISTS` before session operations.
 
 To configure Render, copy the full PostgreSQL connection URI from Neon into:
 
@@ -39,6 +39,8 @@ The GitHub repository root is the project root. Create a Docker Web Service from
 - `TelegramBot__AuthorizedUserId` = your numeric Telegram user ID
 - `ConnectionStrings__DefaultConnection` = full Neon PostgreSQL connection URI
 - `Moodle__BaseUrl=https://moodle.iugaza.edu.ps/`
+- `Moodle__LoginTimeoutSeconds=45`
+- `Moodle__SessionEncryptionKey` = Base64 encoding of 32 random bytes, generated for example with `openssl rand -base64 32`; `Moodle__SessionEncryptionKeyVersion=1`. Store keys only in Render and back them up securely. For rotation, increment the version and retain old values as `Moodle__PreviousSessionEncryptionKeys__1` until old session rows are removed or re-encrypted.
 - `Moodle__ScanIntervalMinutes=10`
 
 Render supplies `PORT`; the app binds to `0.0.0.0` on that port. Verify the deployment with `/health` (liveness) and `/health/ready` (database connection). The readiness response never includes a connection string or exception details.
@@ -47,8 +49,14 @@ An external health monitor may request `/health` every 10 minutes to reduce idle
 
 ## Telegram commands
 
-Commands include `/start`, `/help`, `/courses`, `/updates`, `/quizzes`, `/assignments`, `/report`, `/connect_moodle`, `/my_courses`, `/my_assignments`, `/my_quizzes`, `/upcoming`, `/latest`, `/scan`, and `/status`. Moodle-specific commands report that integration is unavailable and do not return invented data.
+Commands: `/link` (also `/connect_moodle`) starts an Arabic student ID/password flow; `/status` checks the saved session against Moodle; `/my_courses` returns course names read from the authenticated Moodle page; `/logout` deletes the session; `/cancel` cancels the current linking flow. These commands are private-chat-only and restricted to `TelegramBot__AuthorizedUserId`.
 
-## Limitations
+The password message is immediately passed to Telegram's delete API and the bot clears its local message and credential references as soon as the attempt finishes. If deletion fails, the bot asks for manual deletion. Telegram's delete API only removes a message from the chat and cannot guarantee removal from all Telegram systems or backups. The password is not stored in Postgres or browser storage. The saved Playwright storage state is AES-256-GCM encrypted; ciphertext, nonce, authentication tag, and key version are stored in Postgres. Chromium is launched only for link, status, or course commands and disposed after each operation.
 
-The IUG Moodle SSO login, course discovery, baseline/change tracking, scheduled scans, notifications, database schema, and migrations remain unimplemented. No Playwright/Chromium dependency is included. Neon connectivity has been verified from the local app, but Render deployment and Telegram connectivity still require their own environment configuration and deployment check.
+To apply the schema manually in Neon, run `Moodle/001_create_moodle_sessions.sql` in the SQL Editor. This is safe to rerun and does not delete existing data. The app can create the table on first `/link`, `/status`, or `/logout` without a separate migration step.
+
+## Deployment and validation limits
+
+The Docker image uses the Playwright .NET image pinned to the same Playwright version as the NuGet package and installs the .NET 10 ASP.NET runtime. Playwright's official guidance recommends `--init` and shared IPC memory for Chromium; Render's managed Docker service may not expose all Docker run flags. Headless Chromium increases image size and memory use; choose a Render instance with enough memory and monitor restarts. The browser process is short-lived, not kept alive between Telegram updates.
+
+The Moodle SSO site must be tested with the real authorized account. The bot deliberately stops on CAPTCHA/MFA, unexpected identity, unknown page structure, or redirects outside `iugaza.edu.ps`; it never bypasses those checks. No live Moodle credentials were used during implementation, so real authentication and actual course names have not been verified here. Assignment monitoring and notifications remain a later phase.

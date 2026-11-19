@@ -29,12 +29,15 @@ public sealed class TelegramBotService : IUpdateHandler
     }
     public Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken) =>
         update.Message is { } message
-            ? _handler.HandleAsync(message, async (chatId, text, ct) => await botClient.SendMessage(chatId, text, cancellationToken: ct), cancellationToken)
+            ? _handler.HandleAsync(message,
+                async (chatId, text, ct) => await botClient.SendMessage(chatId, text, cancellationToken: ct),
+                async (chatId, messageId, ct) => await botClient.DeleteMessage(chatId, messageId, ct),
+                cancellationToken)
             : Task.CompletedTask;
     public Task HandleErrorAsync(ITelegramBotClient botClient, Exception exception, HandleErrorSource source, CancellationToken cancellationToken)
     {
         if (exception is ApiRequestException apiException) _logger.LogError("Telegram API error {ErrorCode} while handling {Source}.", apiException.ErrorCode, source);
-        else _logger.LogError(exception, "Telegram polling error from {Source}.", source);
+        else _logger.LogError("Telegram polling error of type {ExceptionType} from {Source}.", exception.GetType().Name, source);
         return Task.CompletedTask;
     }
 }

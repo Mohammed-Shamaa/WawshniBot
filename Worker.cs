@@ -6,6 +6,6 @@ public sealed class Worker(TelegramBotService bot, ILogger<Worker> logger) : Bac
     {
         try { await bot.RunAsync(stoppingToken); }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { logger.LogInformation("Telegram polling stopped."); }
-        catch (Exception exception) { logger.LogCritical(exception, "Telegram worker stopped unexpectedly."); throw; }
+        catch (Exception exception) { logger.LogCritical("Telegram worker stopped unexpectedly ({ExceptionType}).", exception.GetType().Name); throw; }
     }
 }
