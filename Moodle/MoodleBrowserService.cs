@@ -65,12 +65,12 @@ public sealed class MoodleBrowserService(
 
                 var profileUrl = new Uri(options.Value.BaseUrl, "user/profile.php");
                 await page.GotoAsync(profileUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
-                var profileText = await page.Locator("body").InnerTextAsync();
-                var authenticated = !page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)
+                // This context starts without cookies, and the student ID above was submitted to the IUG login form.
+                // Moodle's profile page does not necessarily display usernames, so authenticate via its session marker.
+                var authenticated = IsUniversityHost(page.Url)
+                    && !page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)
                     && await page.Locator("a[href*='logout'], a[href*='login/logout.php'], #user-menu-toggle, [data-region='user-menu']").CountAsync() > 0;
                 if (!authenticated) return new(MoodleLinkResultKind.InvalidCredentials, [], false);
-                if (!profileText.Contains(studentId, StringComparison.OrdinalIgnoreCase))
-                    return new(MoodleLinkResultKind.IdentityUnverified, [], false);
 
                 var state = await context.StorageStateAsync();
                 var encrypted = crypto.Encrypt(telegramUserId, state);
