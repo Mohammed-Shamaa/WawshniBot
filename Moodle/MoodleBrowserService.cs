@@ -287,15 +287,17 @@ public sealed class MoodleBrowserService(
         try { await page.Locator("#page-mod-assign-view, [data-region='assignment-info'], .activity-header").First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 5_000 }); }
         catch (PlaywrightException) { await page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 3_000 }).ContinueOnTimeout(); }
 
-        var data = await page.EvaluateAsync<AssignmentPageData>("""() => {
-          const text = e => (e?.innerText || e?.textContent || '').replace(/\\s+/g, ' ').trim();
+        var data = await page.EvaluateAsync<AssignmentPageData>("""
+        () => {
+          const text = e => (e?.innerText || e?.textContent || '').replace(/\s+/g, ' ').trim();
           const title = text(document.querySelector('h1')) || text(document.querySelector('[data-region="activity-header"] h1'));
           const body = text(document.body);
           const timeValues = [...document.querySelectorAll('time[datetime]')].map(e => ({ label: text(e.parentElement), value: e.getAttribute('datetime') }));
           const rows = [...document.querySelectorAll('tr, .submissionstatustable tr, [data-region="assign-info"] tr')].map(r => ({ label: text(r.querySelector('th, td:first-child, .col-1')), value: text(r.querySelector('td:last-child, .col-2')), iso: r.querySelector('time[datetime]')?.getAttribute('datetime') || null }));
           const description = text(document.querySelector('.activity-description, [data-region="activity-description"], #intro'));
           return { title, body, description, timeValues, rows };
-        }""");
+        }
+        """);
         var title = MoodleAssignmentExtractor.NormalizeTitle(data.Title);
         if (string.IsNullOrWhiteSpace(title)) return null;
 

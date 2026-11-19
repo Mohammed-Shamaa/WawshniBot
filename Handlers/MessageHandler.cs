@@ -124,6 +124,7 @@ public sealed class MessageHandler(
                 break;
             case "/my_assignments":
             case "/assignments":
+                await SafeReply(message.Chat.Id, "⏳ جاري جلب واجباتك من Moodle...", reply, cancellationToken);
                 var assignmentsResult = await moodleBrowser.GetAssignmentsAsync(message.From.Id, cancellationToken);
                 response = FormatAssignments(assignmentsResult);
                 break;
@@ -148,10 +149,14 @@ public sealed class MessageHandler(
 
     private async Task SafeReply(long chatId, string text, Func<long, string, CancellationToken, Task> reply, CancellationToken cancellationToken)
     {
-        try { await reply(chatId, text, cancellationToken); }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        foreach (var chunk in TelegramTextChunker.Split(text))
         {
-            logger.LogError("Failed to reply to Telegram ({ExceptionType}).", exception.GetType().Name);
+            try { await reply(chatId, chunk, cancellationToken); }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogError("Failed to reply to Telegram ({ExceptionType}); response chunk length {Length}.", exception.GetType().Name, chunk.Length);
+                return;
+            }
         }
     }
 
