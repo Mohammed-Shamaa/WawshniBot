@@ -68,6 +68,47 @@ public sealed class MoodleAssignmentExtractorTests
         Assert.Equal(MoodleAssignmentStatus.Unavailable, MoodleAssignmentExtractor.MapStatus(null));
     }
 
+    [Fact]
+    public void Recognized_empty_course_pages_mean_no_assignments_but_unrecognized_pages_are_extraction_failures()
+    {
+        var empty = MoodleAssignmentExtractor.CreateResult([], failureCount: 0, recognizedCoursePages: true);
+        var unknown = MoodleAssignmentExtractor.CreateResult([], failureCount: 0, recognizedCoursePages: false);
+
+        Assert.Equal(MoodleAssignmentsResultKind.Success, empty.Kind);
+        Assert.Empty(empty.Assignments);
+        Assert.Equal(MoodleAssignmentsResultKind.ExtractionFailed, unknown.Kind);
+    }
+
+    [Fact]
+    public void Partial_course_failures_keep_real_assignments_from_successful_courses()
+    {
+        var real = Assignment("واجب اختباري", "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=91");
+        var result = MoodleAssignmentExtractor.CreateResult([real], failureCount: 1, recognizedCoursePages: true);
+
+        Assert.Equal(MoodleAssignmentsResultKind.Partial, result.Kind);
+        Assert.Single(result.Assignments);
+        Assert.Equal(real.Title, result.Assignments[0].Title);
+    }
+
+    [Fact]
+    public void Moodle_assign_and_quiz_urls_are_classified_by_their_actual_activity_paths()
+    {
+        var links = MoodleAssignmentExtractor.NormalizeLinks(
+        [
+            new MoodleAssignmentLink("https://moodle.iugaza.edu.ps/mod/assign/view.php?id=412159", "واجب برمجة"),
+            new MoodleAssignmentLink("https://moodle.iugaza.edu.ps/mod/assign/view.php?id=311562", ""),
+            new MoodleAssignmentLink("https://moodle.iugaza.edu.ps/mod/assign/view.php?id=412159&forceview=1", "اسم بديل"),
+            new MoodleAssignmentLink("https://moodle.iugaza.edu.ps/mod/quiz/view.php?id=411990", "امتحان"),
+            new MoodleAssignmentLink("https://example.com/mod/assign/view.php?id=99", "خارجي"),
+            new MoodleAssignmentLink("https://moodle.iugaza.edu.ps/mod/assign/view.php", "بدون id")
+        ], new Uri("https://moodle.iugaza.edu.ps/"));
+
+        Assert.Equal(2, links.Count);
+        Assert.Contains(links, link => link.Href == "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=412159" && link.Title == "واجب برمجة");
+        Assert.Contains(links, link => link.Href == "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=311562" && link.Title == "");
+        Assert.DoesNotContain(links, link => link.Href.Contains("/mod/quiz/", StringComparison.Ordinal));
+    }
+
     private static MoodleAssignment Assignment(string title, string url, DateTimeOffset? due = null, MoodleDateKnowledge? knowledge = null) =>
         new(title, "مساق", url, null, due, knowledge ?? (due.HasValue ? MoodleDateKnowledge.Known : MoodleDateKnowledge.NoDeadline), null, null, MoodleAssignmentStatus.NotSubmitted, null);
 }

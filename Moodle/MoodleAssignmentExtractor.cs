@@ -17,6 +17,7 @@ public sealed record MoodleAssignment(
     DateTimeOffset? CutoffAt,
     MoodleAssignmentStatus Status,
     DateTimeOffset? SubmittedAt);
+public sealed record MoodleAssignmentLink(string Href, string Title);
 public sealed record MoodleAssignmentsResult(MoodleAssignmentsResultKind Kind, IReadOnlyList<MoodleAssignment> Assignments);
 
 /// <summary>Maps authenticated Moodle page data to user-facing assignment records.</summary>
@@ -58,7 +59,36 @@ public static class MoodleAssignmentExtractor
         .Select(group => group.First())
         .ToList();
 
+    public static MoodleAssignmentsResult CreateResult(IEnumerable<MoodleAssignment> assignments, int failureCount, bool recognizedCoursePages)
+    {
+        var items = Deduplicate(assignments);
+        if (!recognizedCoursePages && items.Count == 0)
+            return new(MoodleAssignmentsResultKind.ExtractionFailed, []);
+        return failureCount > 0
+            ? new(MoodleAssignmentsResultKind.Partial, items)
+            : new(MoodleAssignmentsResultKind.Success, items);
+    }
+
     public static string ActivityKey(string value) => CanonicalUrl(value);
+
+    public static IReadOnlyList<MoodleAssignmentLink> NormalizeLinks(IEnumerable<MoodleAssignmentLink> links, Uri moodleBaseUrl)
+    {
+        var normalized = new Dictionary<string, MoodleAssignmentLink>(StringComparer.OrdinalIgnoreCase);
+        foreach (var link in links)
+        {
+            if (!Uri.TryCreate(link.Href, UriKind.Absolute, out var uri)
+                || !uri.Scheme.Equals(moodleBaseUrl.Scheme, StringComparison.OrdinalIgnoreCase)
+                || !uri.Host.Equals(moodleBaseUrl.Host, StringComparison.OrdinalIgnoreCase)
+                || !uri.AbsolutePath.Contains("/mod/assign/view.php", StringComparison.OrdinalIgnoreCase)
+                || !int.TryParse(System.Web.HttpUtility.ParseQueryString(uri.Query).Get("id"), out _)) continue;
+
+            var key = ActivityKey(uri.ToString());
+            var title = NormalizeTitle(link.Title);
+            if (!normalized.ContainsKey(key) || (normalized[key].Title.Length == 0 && title.Length > 0))
+                normalized[key] = new MoodleAssignmentLink(uri.ToString(), title);
+        }
+        return normalized.Values.ToList();
+    }
 
     public static IReadOnlyList<MoodleAssignment> Sort(IReadOnlyList<MoodleAssignment> assignments, DateTimeOffset now) => assignments
         .OrderBy(a => a.DueDateKnowledge == MoodleDateKnowledge.Known && a.DueAt < now ? 0 : 1)

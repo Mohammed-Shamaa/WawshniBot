@@ -177,7 +177,8 @@ public sealed class MoodleBrowserService(
     {
         var target = MoodleCoursePageUrl.FromBaseUrl(options.Value.BaseUrl);
         var response = await page.GotoAsync(target.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 25_000 });
-        logger.LogInformation("Moodle course list navigation for assignments completed; HTTP status {StatusCode}.", response?.Status.ToString() ?? "unavailable");
+        logger.LogInformation("Moodle assignments stage {Stage}: final URL {FinalUrl}; page title {PageTitle}; HTTP status {StatusCode}.",
+            "course-list-navigation", SafeUrl(page.Url), await page.TitleAsync(), response?.Status.ToString() ?? "unavailable");
         if (!IsUniversityHost(page.Url)) return new(MoodleAssignmentsResultKind.Unavailable, []);
         if (page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)) return new(MoodleAssignmentsResultKind.Expired, []);
         if (response?.Status is >= 400) return new(MoodleAssignmentsResultKind.Unavailable, []);
@@ -188,7 +189,16 @@ public sealed class MoodleBrowserService(
         var coursePaginationTruncated = false;
         for (var pageNumber = 0; pageNumber < 50 && coursePages.Add(coursePageUrl.AbsoluteUri); pageNumber++)
         {
-            courses.AddRange(await page.Locator("a[href*='course/view.php']").EvaluateAllAsync<CourseLink[]>("els => els.map(a => ({ href: a.href, name: (a.innerText || a.getAttribute('aria-label') || '').trim() })).filter(x => x.href && x.name)"));
+            var courseAnchors = page.Locator("a[href*='course/view.php']").Visible;
+            if (pageNumber == 0)
+            {
+                try { await courseAnchors.First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 12_000 }); }
+                catch (PlaywrightException) { /* Log the observed counts below; absence alone does not mean no enrollment. */ }
+            }
+            var pageCourses = await courseAnchors.EvaluateAllAsync<CourseLink[]>("els => els.map(a => ({ href: a.href, name: (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim() })).filter(x => x.href)");
+            courses.AddRange(pageCourses);
+            if (pageNumber == 0)
+                logger.LogInformation("Moodle assignments stage {Stage}: visible course links {VisibleCourseLinkCount}; page {PageNumber}.", "course-link-discovery", pageCourses.Length, pageNumber + 1);
             var nextLink = page.Locator(".pagination a[rel='next'], nav[aria-label*='pagination' i] a[aria-label*='next' i], nav[aria-label*='التصفح'] a[aria-label*='التالي'], a[aria-label='Next page'], a[aria-label='الصفحة التالية']");
             if (await nextLink.CountAsync() == 0) break;
             if (pageNumber == 49) { coursePaginationTruncated = true; break; }
@@ -199,62 +209,122 @@ public sealed class MoodleBrowserService(
             if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)) return new(MoodleAssignmentsResultKind.Expired, []);
             if (coursePageResponse?.Status is >= 400) return new(MoodleAssignmentsResultKind.Partial, []);
         }
-        var distinctCourses = courses
-            .Select(c => (Link: c, Uri: Uri.TryCreate(c.Href, UriKind.Absolute, out var uri) ? uri : null))
-            .Where(x => x.Uri is not null && IsUniversityHost(x.Uri.ToString()) && x.Uri.AbsolutePath.Contains("/course/view.php", StringComparison.OrdinalIgnoreCase))
-            .GroupBy(x => x.Uri!.Query, StringComparer.OrdinalIgnoreCase).Select(g => g.First()).ToList();
+        var distinctCourses = MoodleCourseDomExtractor.NormalizeLinks(
+            courses.Select(c => new MoodleCourseLink(c.Name, c.Href)), options.Value.BaseUrl);
+        logger.LogInformation("Moodle assignments stage {Stage}: unique enrolled courses {CourseCount} from {CourseLinkCount} links.",
+            "course-link-normalization", distinctCourses.Count, courses.Count);
         if (distinctCourses.Count == 0)
         {
-            var body = await page.Locator("body").InnerTextAsync();
-            if (body.Contains("no courses available", StringComparison.OrdinalIgnoreCase) || body.Contains("لا توجد مساقات", StringComparison.OrdinalIgnoreCase))
+            logger.LogWarning("Moodle assignments stage {Stage}: no course URLs passed validation; final URL {FinalUrl}; page title {PageTitle}.",
+                "course-link-normalization", SafeUrl(page.Url), await page.TitleAsync());
+            if (await HasExplicitEmptyCourseMessageAsync(page))
                 return new(MoodleAssignmentsResultKind.Success, []);
             return new(MoodleAssignmentsResultKind.ExtractionFailed, []);
         }
 
         var collected = new List<MoodleAssignment>();
         var failures = coursePaginationTruncated ? 1 : 0;
+        var recognizedCoursePages = 0;
         if (coursePaginationTruncated) logger.LogWarning("Moodle course pagination reached its safety limit; assignment results may be partial.");
+        var courseOrdinal = 0;
         foreach (var course in distinctCourses)
         {
+            courseOrdinal++;
+            var stage = "course-id";
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var courseId = System.Web.HttpUtility.ParseQueryString(course.Uri!.Query).Get("id");
-                if (!int.TryParse(courseId, out var id)) { failures++; continue; }
+                var courseUri = new Uri(course.Href);
+                var courseId = System.Web.HttpUtility.ParseQueryString(courseUri.Query).Get("id");
+                if (!int.TryParse(courseId, out var id)) { failures++; logger.LogWarning("Moodle assignment stage {Stage}: could not read course id for course #{CourseOrdinal}.", "course-id", courseOrdinal); continue; }
                 var indexUrl = new Uri(options.Value.BaseUrl, $"mod/assign/index.php?id={id}");
-                var indexData = await ReadAssignmentLinksAsync(page, indexUrl, cancellationToken);
-                if (indexData is null) return new(MoodleAssignmentsResultKind.Expired, []);
+                var coursePageUrl = new Uri(options.Value.BaseUrl, $"course/view.php?id={id}");
+                stage = "course-page-navigation";
+                logger.LogInformation("Moodle assignment stage {Stage}: opening course page for course #{CourseOrdinal}; URL {Url}.",
+                    "course-page-navigation", courseOrdinal, SafeUrl(coursePageUrl.ToString()));
+                var coursePageResponse = await page.GotoAsync(coursePageUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
+                logger.LogInformation("Moodle course page result for course #{CourseOrdinal}: final URL {FinalUrl}; page title {PageTitle}; HTTP status {StatusCode}.",
+                    courseOrdinal, SafeUrl(page.Url), await page.TitleAsync(), coursePageResponse?.Status.ToString() ?? "unavailable");
+                if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)) return new(MoodleAssignmentsResultKind.Expired, []);
+                stage = "course-page-dom";
+                var coursePageLinks = await ReadVisibleAssignmentLinksAsync(page);
+                var indexData = new AssignmentIndexPageResult([], false, false);
+                try
+                {
+                    stage = "assignment-index-pagination";
+                    logger.LogInformation("Moodle assignment stage {Stage}: checking the course assignment index for course #{CourseOrdinal}; URL {Url}.",
+                        "assignment-index-navigation", courseOrdinal, SafeUrl(indexUrl.ToString()));
+                    var indexResult = await ReadAssignmentLinksAsync(page, indexUrl, cancellationToken);
+                    if (indexResult is null) return new(MoodleAssignmentsResultKind.Expired, []);
+                    indexData = indexResult;
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    failures++;
+                    logger.LogWarning("Moodle assignment index failed for course #{CourseOrdinal} ({ExceptionType}); safe message: {SafeMessage}.",
+                        courseOrdinal, exception.GetType().Name, SafeExceptionMessage(exception));
+                }
+                var allCourseLinks = coursePageLinks.Concat(indexData.Links)
+                    .Select(link => new MoodleAssignmentLink(link.Href, link.Title));
+                var normalizedCourseLinks = MoodleAssignmentExtractor.NormalizeLinks(allCourseLinks, options.Value.BaseUrl)
+                    .Select(link => new AssignmentLink { Href = link.Href, Title = link.Title }).ToArray();
+                indexData = new AssignmentIndexPageResult(normalizedCourseLinks, indexData.Truncated,
+                    indexData.Recognized || coursePageLinks.Length > 0);
                 if (indexData.Truncated) failures++;
-                logger.LogInformation("Moodle course assignment index inspected; assignment links {Count}.", indexData.Links.Length);
+                if (!indexData.Recognized)
+                {
+                    failures++;
+                    logger.LogWarning("Moodle assignment stage {Stage}: neither assignment links nor a recognized empty state appeared for course #{CourseOrdinal}; final URL {FinalUrl}; page title {PageTitle}.",
+                        "assignment-index-dom", courseOrdinal, SafeUrl(page.Url), await page.TitleAsync());
+                    continue;
+                }
+                recognizedCoursePages++;
+                logger.LogInformation("Moodle assignment stage {Stage}: detected {AssignmentLinkCount} assignment activities in course #{CourseOrdinal}.",
+                    "assignment-link-discovery", indexData.Links.Length, courseOrdinal);
                 foreach (var link in indexData.Links)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var assignment = await ReadAssignmentDetailAsync(page, link, course.Link.Name, cancellationToken);
+                    stage = "assignment-details";
+                    var assignment = await ReadAssignmentDetailAsync(page, link, course.Name, cancellationToken);
                     if (assignment is not null) collected.Add(assignment); else failures++;
                 }
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 failures++;
-                logger.LogWarning("Could not inspect an enrolled course for assignments ({ExceptionType}).", exception.GetType().Name);
+                logger.LogWarning("Moodle assignment retrieval failed at stage {Stage} for course #{CourseOrdinal} ({ExceptionType}); safe message: {SafeMessage}. Stack trace: {StackTrace}",
+                    stage, courseOrdinal, exception.GetType().Name, SafeExceptionMessage(exception), exception.StackTrace);
             }
         }
 
         var assignments = MoodleAssignmentExtractor.Deduplicate(collected);
-        logger.LogInformation("Moodle assignment extraction completed; assignments {Count}; course or detail failures {FailureCount}.", assignments.Count, failures);
-        if (failures > 0) return new(MoodleAssignmentsResultKind.Partial, assignments);
-        if (assignments.Count == 0 && distinctCourses.Count > 0)
+        var result = MoodleAssignmentExtractor.CreateResult(assignments, failures, recognizedCoursePages > 0);
+        logger.LogInformation("Moodle assignment extraction completed; result {ResultKind}; detected {AssignmentCount}; recognized course pages {RecognizedCoursePageCount}; failures {FailureCount}.",
+            result.Kind, result.Assignments.Count, recognizedCoursePages, failures);
+        return result;
+    }
+
+    private static async Task<AssignmentLink[]> ReadVisibleAssignmentLinksAsync(IPage page, bool waitForVisible = true)
+    {
+        var selector = "a[href*='/mod/assign/view.php?id=']";
+        var links = page.Locator(selector).Visible;
+        if (waitForVisible)
         {
-            // Empty is asserted only when Moodle's assignment index pages loaded and exposed no assignment links.
-            return new(MoodleAssignmentsResultKind.Success, []);
+            try { await links.First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 5_000 }); }
+            catch (PlaywrightException) { /* No activity links may be a valid empty course; caller checks the index page too. */ }
         }
-        return new(MoodleAssignmentsResultKind.Success, assignments);
+        var found = await links.EvaluateAllAsync<AssignmentLink[]>("els => els.map(a => ({ href: a.href, title: (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim() })).filter(x => x.href)");
+        return MoodleAssignmentExtractor.NormalizeLinks(
+                found.Select(link => new MoodleAssignmentLink(link.Href, link.Title)), options.Value.BaseUrl)
+            .Select(link => new AssignmentLink { Href = link.Href, Title = link.Title })
+            .ToArray();
     }
 
     private async Task<AssignmentIndexPageResult?> ReadAssignmentLinksAsync(IPage page, Uri firstPage, CancellationToken cancellationToken)
     {
         var found = new List<AssignmentLink>();
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var recognized = false;
         Uri? next = firstPage;
         for (var pageNumber = 0; next is not null && pageNumber < 50; pageNumber++)
         {
@@ -266,16 +336,34 @@ public sealed class MoodleBrowserService(
             logger.LogInformation("Moodle assignment index page loaded; HTTP status {StatusCode}; pagination page {PageNumber}.", response?.Status.ToString() ?? "unavailable", pageNumber + 1);
             if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)) return null;
             if (response?.Status is >= 400) throw new InvalidOperationException("Moodle assignment index returned an unsuccessful HTTP status.");
-            await page.Locator("a[href*='/mod/assign/view.php?id='], .generaltable, [data-region='assignments']").First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 7_000 }).ContinueOnTimeout();
-            found.AddRange(await page.Locator("a[href*='/mod/assign/view.php?id=']").EvaluateAllAsync<AssignmentLink[]>("els => els.map(a => ({ href: a.href, title: (a.innerText || a.getAttribute('aria-label') || '').trim() })).filter(x => x.href && x.title)"));
+            await page.Locator("a[href*='/mod/assign/view.php?id='], .generaltable, [data-region='assignments'], .activity-list").First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 7_000 }).ContinueOnTimeout();
+            var pageLinks = await ReadVisibleAssignmentLinksAsync(page, waitForVisible: false);
+            found.AddRange(pageLinks);
+            var hasAssignmentTable = await page.Locator(".generaltable, [data-region='assignments'], .activity-list").CountAsync() > 0;
+            var hasEmptyMessage = await HasExplicitEmptyAssignmentMessageAsync(page);
+            recognized |= pageLinks.Length > 0 || hasAssignmentTable || hasEmptyMessage;
             var nextLink = page.Locator(".pagination a[rel='next'], nav[aria-label*='pagination' i] a[aria-label*='next' i], nav[aria-label*='التصفح'] a[aria-label*='التالي'], a[aria-label='Next page'], a[aria-label='الصفحة التالية']");
             var nextHref = await nextLink.CountAsync() > 0 ? await nextLink.First.GetAttributeAsync("href") : null;
             if (!string.IsNullOrWhiteSpace(nextHref) && Uri.TryCreate(current, nextHref, out var nextUri) && IsUniversityHost(nextUri.ToString())) next = nextUri;
         }
         var truncated = next is not null;
         if (truncated) logger.LogWarning("Moodle assignment index pagination reached its safety limit; collected records may be partial.");
-        var links = found.GroupBy(a => MoodleAssignmentExtractor.ActivityKey(a.Href), StringComparer.OrdinalIgnoreCase).Select(g => g.First()).ToArray();
-        return new AssignmentIndexPageResult(links, truncated);
+        var links = MoodleAssignmentExtractor.NormalizeLinks(
+                found.Select(link => new MoodleAssignmentLink(link.Href, link.Title)), options.Value.BaseUrl)
+            .Select(link => new AssignmentLink { Href = link.Href, Title = link.Title }).ToArray();
+        return new AssignmentIndexPageResult(links, truncated, recognized);
+    }
+
+    private static async Task<bool> HasExplicitEmptyAssignmentMessageAsync(IPage page)
+    {
+        var body = await page.Locator("body").InnerTextAsync();
+        return body.Contains("no assignments", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("no activities", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("there are no assignments", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("لا توجد واجبات", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("لا يوجد واجبات", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("لا توجد تكليفات", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("لا توجد أنشطة", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<MoodleAssignment?> ReadAssignmentDetailAsync(IPage page, AssignmentLink link, string courseName, CancellationToken cancellationToken)
@@ -322,7 +410,7 @@ public sealed class MoodleBrowserService(
 
     private sealed class CourseLink { public string Href { get; set; } = ""; public string Name { get; set; } = ""; }
     private sealed class AssignmentLink { public string Href { get; set; } = ""; public string Title { get; set; } = ""; }
-    private sealed record AssignmentIndexPageResult(AssignmentLink[] Links, bool Truncated);
+    private sealed record AssignmentIndexPageResult(AssignmentLink[] Links, bool Truncated, bool Recognized);
     private sealed class AssignmentPageData
     {
         public string Title { get; set; } = ""; public string Body { get; set; } = ""; public string Description { get; set; } = "";
