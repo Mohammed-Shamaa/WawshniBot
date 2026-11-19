@@ -238,11 +238,11 @@ public sealed class MoodleBrowserService(
                 var courseId = System.Web.HttpUtility.ParseQueryString(courseUri.Query).Get("id");
                 if (!int.TryParse(courseId, out var id)) { failures++; logger.LogWarning("Moodle assignment stage {Stage}: could not read course id for course #{CourseOrdinal}.", "course-id", courseOrdinal); continue; }
                 var indexUrl = new Uri(options.Value.BaseUrl, $"mod/assign/index.php?id={id}");
-                var coursePageUrl = new Uri(options.Value.BaseUrl, $"course/view.php?id={id}");
+                var courseActivityUrl = new Uri(options.Value.BaseUrl, $"course/view.php?id={id}");
                 stage = "course-page-navigation";
                 logger.LogInformation("Moodle assignment stage {Stage}: opening course page for course #{CourseOrdinal}; URL {Url}.",
-                    "course-page-navigation", courseOrdinal, SafeUrl(coursePageUrl.ToString()));
-                var coursePageResponse = await page.GotoAsync(coursePageUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
+                    "course-page-navigation", courseOrdinal, SafeUrl(courseActivityUrl.ToString()));
+                var coursePageResponse = await page.GotoAsync(courseActivityUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
                 logger.LogInformation("Moodle course page result for course #{CourseOrdinal}: final URL {FinalUrl}; page title {PageTitle}; HTTP status {StatusCode}.",
                     courseOrdinal, SafeUrl(page.Url), await page.TitleAsync(), coursePageResponse?.Status.ToString() ?? "unavailable");
                 if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)) return new(MoodleAssignmentsResultKind.Expired, []);
@@ -304,7 +304,7 @@ public sealed class MoodleBrowserService(
         return result;
     }
 
-    private static async Task<AssignmentLink[]> ReadVisibleAssignmentLinksAsync(IPage page, bool waitForVisible = true)
+    private async Task<AssignmentLink[]> ReadVisibleAssignmentLinksAsync(IPage page, bool waitForVisible = true)
     {
         var selector = "a[href*='/mod/assign/view.php?id=']";
         var links = page.Locator(selector).Visible;
