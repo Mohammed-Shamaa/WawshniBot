@@ -137,7 +137,7 @@ public sealed class MessageHandler(
             case "/quizzes": response = "استرجاع الاختبارات غير متاح بعد."; break;
             case "/updates": response = "مزامنة مستجدات المساقات غير متاحة بعد."; break;
             case "/report": response = "التقارير ستتوفر في مرحلة لاحقة."; break;
-            case _ when messageText.StartsWith('/'): response = "لم أتعرف على هذا الأمر. أرسل /help."; break;
+            case var _ when messageText.StartsWith('/'): response = "لم أتعرف على هذا الأمر. أرسل /help."; break;
             default: response = "وصلتني رسالتك. أرسل /help لعرض الأوامر المتاحة."; break;
         }
         await SafeReply(message.Chat.Id, response, reply, cancellationToken);
