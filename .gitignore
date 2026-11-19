@@ -4,6 +4,10 @@
 .env
 .env.*
 !.env.example
+.neon-cli/
+.neon/
+.agents/
+skills-lock.json
 secrets*
 playwright/.auth/
 **/auth.json
@@ -11,3 +15,4 @@ logs/
 *.log
 *.db
 *.sqlite*
+node_modules/

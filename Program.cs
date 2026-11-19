@@ -19,16 +19,13 @@ builder.Services.AddSingleton<TelegramUserAuthorization>();
 builder.Services.AddSingleton<MoodleConnectionStatus>();
 builder.Services.AddSingleton<MessageHandler>();
 builder.Services.AddSingleton<TelegramBotService>();
+builder.Services.AddSingleton<NeonDatabaseReadiness>();
 builder.Services.AddHostedService<Worker>();
 
 var app = builder.Build();
 app.MapGet("/health", () => Results.Json(new { status = "ok" }));
+app.MapGet("/health/ready", async (NeonDatabaseReadiness database, CancellationToken cancellationToken) =>
+    await database.CanConnectAsync(cancellationToken)
+        ? Results.Json(new { status = "ready", postgres = "ok" })
+        : Results.Json(new { status = "not_ready" }, statusCode: StatusCodes.Status503ServiceUnavailable));
 await app.RunAsync();
-
-namespace Wawshni.Bot;
-public sealed class TelegramOptions
-{
-    public const string SectionName = "TelegramBot";
-    public string Token { get; set; } = string.Empty;
-    public long? AuthorizedUserId { get; set; }
-}

@@ -1,64 +1,54 @@
 # WawshniBot
 
-Arabic-first Telegram assistant built on .NET 10. The current implementation runs an ASP.NET Core Web Service and Telegram polling in one process. Moodle connectivity and persistence are not implemented; no Moodle records or activity data are fabricated.
-
-## Current state
-
-- `/health` returns a small liveness response and does not query external services.
-- Telegram uses long polling through a hosted service when `TelegramBot__Token` is configured.
-- User authorization uses `TelegramBot__AuthorizedUserId`.
-- Moodle commands report that integration is unavailable.
-- PostgreSQL/Neon configuration is documented for a future persistence stage; EF Core, Npgsql, entities and migrations are not present.
+Arabic-first Telegram assistant built on .NET 10. ASP.NET Core, Telegram long polling, and Neon PostgreSQL connectivity run in one process. Moodle access and monitoring are not implemented; the bot does not fabricate course data.
 
 ## Local setup
 
-Prerequisite: .NET 10 SDK. From this directory:
+Prerequisite: .NET 10 SDK.
 
 ```powershell
 dotnet restore
-dotnet build
+dotnet build -c Release
 $env:TelegramBot__Token = "YOUR_ROTATED_TOKEN"
 $env:TelegramBot__AuthorizedUserId = "YOUR_TELEGRAM_USER_ID"
 dotnet run
 ```
 
-The app uses `PORT` when provided; otherwise ASP.NET Core uses local defaults. Never commit `.env` files or credentials. Rotate any bot token shared in chat and use the replacement only in local secrets or deployment environment settings.
+Never commit `.env` files or credentials. Rotate any Telegram token shared in chat and configure the replacement only in local secrets or the hosting environment.
 
-## Neon PostgreSQL (planned)
+## Neon database
 
-Create a PostgreSQL project in Neon and copy its pooled connection string from the Neon dashboard. Configure it as `ConnectionStrings__DefaultConnection` in the deployment environment, with TLS enabled (Neon connection strings normally include `sslmode=require`). Do not commit the connection string.
+The project is linked to the Neon project and `production` branch with the Neon CLI. `neon.ts` and `package.json` declare the Neon configuration; `.env.local` contains connection variables pulled by the CLI and is ignored by Git.
 
-Database persistence has not been implemented, so no migrations exist yet. After EF Core/Npgsql and migrations are added, apply them with:
+The .NET app accepts either `ConnectionStrings__DefaultConnection` or `DATABASE_URL`. It uses Npgsql's pooled `NpgsqlDataSource`, requires TLS for PostgreSQL URLs, and runs only a read-only `SELECT 1` check at `/health/ready`. The app currently has no schema, EF Core entities, or migrations, and does not write to the database.
 
-```powershell
-dotnet ef database update --project Wawshni.Bot.csproj
+To configure Render, copy the full PostgreSQL connection URI from Neon into:
+
+```text
+ConnectionStrings__DefaultConnection
 ```
 
-Run that command only after configuring a valid connection string. No schema changes or production database operations have been performed.
+Do not use the Neon Data API REST URL here. Keep the URI private. Locally, the Neon CLI can refresh `.env.local` with `neon env pull`; make `DATABASE_URL` available to the process or set `ConnectionStrings__DefaultConnection` in the shell.
 
 ## Render Web Service
 
-1. Push the repository to GitHub yourself, then create a **Web Service** in Render from that repository.
-2. Set the root directory to `WawshniAssistant/Wawshni.Bot` and choose Docker deployment.
-3. Add environment variables:
-   - `ASPNETCORE_ENVIRONMENT=Production`
-   - `TelegramBot__Token` = a rotated Telegram token
-   - `TelegramBot__AuthorizedUserId` = your numeric Telegram user ID
-   - `ConnectionStrings__DefaultConnection` = Neon PostgreSQL URL (for when persistence is implemented)
-   - `Moodle__BaseUrl=https://moodle.iugaza.edu.ps/`
-   - `Moodle__ScanIntervalMinutes=10`
-4. Deploy and check `https://YOUR-SERVICE.onrender.com/health`; expected JSON: `{"status":"ok"}`.
+The GitHub repository root is the project root. Create a Docker Web Service from the repository and leave the root directory empty (repository root). The `Dockerfile` is at that root. Add:
 
-Render supplies `PORT`; the app binds to `0.0.0.0` on that port. Docker provides port 10000 as a local fallback. Hosted services run in the web process; no separate Render Background Worker is needed.
+- `ASPNETCORE_ENVIRONMENT=Production`
+- `TelegramBot__Token` = rotated Telegram token
+- `TelegramBot__AuthorizedUserId` = your numeric Telegram user ID
+- `ConnectionStrings__DefaultConnection` = full Neon PostgreSQL connection URI
+- `Moodle__BaseUrl=https://moodle.iugaza.edu.ps/`
+- `Moodle__ScanIntervalMinutes=10`
 
-An external health monitor may request `/health` every 10 minutes to reduce idle spin-down. This does not guarantee 24/7 uptime and cannot prevent restarts, maintenance, or free-tier interruptions. Render's filesystem is ephemeral; durable state must live in PostgreSQL. Neon free-tier limits and availability may change.
+Render supplies `PORT`; the app binds to `0.0.0.0` on that port. Verify the deployment with `/health` (liveness) and `/health/ready` (database connection). The readiness response never includes a connection string or exception details.
+
+An external health monitor may request `/health` every 10 minutes to reduce idle spin-down. This cannot prevent Render restarts or guarantee 24/7 uptime. Render's filesystem is ephemeral; `.env.local` is for local development only. Persistent application data must be stored in the database.
 
 ## Telegram commands
 
-Supported commands include `/start`, `/help`, `/courses`, `/updates`, `/quizzes`, `/assignments`, `/report`, `/connect_moodle`, `/my_courses`, `/my_assignments`, `/my_quizzes`, `/upcoming`, `/latest`, `/scan`, and `/status`. Moodle commands currently return unavailable status; they do not authenticate or scan.
+Commands include `/start`, `/help`, `/courses`, `/updates`, `/quizzes`, `/assignments`, `/report`, `/connect_moodle`, `/my_courses`, `/my_assignments`, `/my_quizzes`, `/upcoming`, `/latest`, `/scan`, and `/status`. Moodle-specific commands report that integration is unavailable and do not return invented data.
 
-## Moodle and deployment limitations
+## Limitations
 
-The university site uses SSO and no authorized Moodle REST token has been confirmed. Moodle authentication, course discovery, baseline/change tracking, scheduled scans, notifications, PostgreSQL schema and migration are not implemented or tested. Browser session state must not be kept on Render's ephemeral disk; use a supported API or a carefully protected external secret/session store after university-approved authentication. Playwright/Chromium has not been added, avoiding its extra image size and memory demand on a free instance.
-
-Build and Docker deployment have not been verified because NuGet access is unavailable in this environment. `/health` is a liveness endpoint only and intentionally does not prove database, Telegram, or Moodle readiness.
+The IUG Moodle SSO login, course discovery, baseline/change tracking, scheduled scans, notifications, database schema, and migrations remain unimplemented. No Playwright/Chromium dependency is included. Neon connectivity has been verified from the local app, but Render deployment and Telegram connectivity still require their own environment configuration and deployment check.

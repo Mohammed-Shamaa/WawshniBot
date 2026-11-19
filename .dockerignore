@@ -1,6 +1,9 @@
 **/bin/
 **/obj/
 **/.git/
+**/.agents/
+**/.neon-cli/
+**/node_modules/
 **/.vs/
 **/.env
 **/.env.*
@@ -8,4 +11,9 @@
 **/auth.json
 **/playwright/.auth/
 **/logs/
+.neon
+package.json
+package-lock.json
+neon.ts
+skills-lock.json
 *.log
