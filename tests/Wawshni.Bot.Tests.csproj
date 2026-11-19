@@ -22,5 +22,6 @@
     <Compile Include="..\Moodle\MoodleSessionCrypto.cs" Link="Moodle\MoodleSessionCrypto.cs" />
     <Compile Include="..\Moodle\MoodleConnectionStatus.cs" Link="Moodle\MoodleConnectionStatus.cs" />
     <Compile Include="..\Moodle\MoodleCourseDomExtractor.cs" Link="Moodle\MoodleCourseDomExtractor.cs" />
+    <Compile Include="..\Moodle\MoodleAssignmentExtractor.cs" Link="Moodle\MoodleAssignmentExtractor.cs" />
   </ItemGroup>
 </Project>

@@ -122,17 +122,20 @@ public sealed class MessageHandler(
                 var courseResult = await moodleBrowser.GetCoursesAsync(message.From.Id, cancellationToken);
                 response = FormatCourses(courseResult);
                 break;
+            case "/my_assignments":
+            case "/assignments":
+                var assignmentsResult = await moodleBrowser.GetAssignmentsAsync(message.From.Id, cancellationToken);
+                response = FormatAssignments(assignmentsResult);
+                break;
             case "/start":
                 response = "أهلاً بك في WawshniBot. أرسل /link لربط حساب Moodle، أو /help لعرض الأوامر.";
                 break;
             case "/help":
-                response = "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء عملية الربط الحالية";
+                response = "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — واجباتي ومواعيدها\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء عملية الربط الحالية";
                 break;
             case "/upcoming": response = "أرسل /link أولاً؛ استرجاع المواعيد غير متاح بعد."; break;
             case "/latest": response = "أرسل /link أولاً؛ لا توجد مزامنة للمستجدات بعد."; break;
             case "/scan": response = "المزامنة غير متاحة في هذه المرحلة."; break;
-            case "/my_assignments":
-            case "/assignments": response = "استرجاع الواجبات غير متاح بعد."; break;
             case "/my_quizzes":
             case "/quizzes": response = "استرجاع الاختبارات غير متاح بعد."; break;
             case "/updates": response = "مزامنة مستجدات المساقات غير متاحة بعد."; break;
@@ -180,6 +183,52 @@ public sealed class MessageHandler(
         MoodleLinkResultKind.Success when result.CoursesRetrieved => "مساقاتك المسجلة في Moodle:\n• " + string.Join("\n• ", result.Courses),
         _ => "تعذر جلب المساقات من Moodle. أرسل /status للتحقق من الجلسة أو /link لإعادة الربط."
     };
+
+    private static string FormatAssignments(MoodleAssignmentsResult result)
+    {
+        if (result.Kind == MoodleAssignmentsResultKind.Expired) return "جلسة Moodle غير موجودة أو انتهت. أرسل /link لإعادة الربط.";
+        if (result.Kind == MoodleAssignmentsResultKind.SessionRestoreFailed) return "تعذر استرجاع جلسة Moodle المحفوظة. أرسل /link لإعادة ربط الحساب.";
+        if (result.Kind == MoodleAssignmentsResultKind.Unavailable) return "تعذر فتح Moodle حالياً لاسترجاع الواجبات. حاول لاحقاً أو تحقق من /status.";
+        if (result.Kind == MoodleAssignmentsResultKind.ExtractionFailed) return "تم فتح Moodle، لكن تعذر التعرف على قائمة المساقات أو الواجبات. لم أعتبر ذلك دليلاً على عدم وجود واجبات.";
+        if (result.Assignments.Count == 0)
+            return result.Kind == MoodleAssignmentsResultKind.Partial
+                ? "تعذر التأكد من وجود واجبات بسبب مشكلة في قراءة بعض صفحات Moodle. أعد المحاولة لاحقاً."
+                : "لم تظهر واجبات مسجلة في صفحات Moodle للمساقات المسجل بها حسابك.";
+
+        var now = DateTimeOffset.UtcNow;
+        var ordered = MoodleAssignmentExtractor.Sort(result.Assignments, now);
+        var lines = new List<string> { result.Kind == MoodleAssignmentsResultKind.Partial ? "📚 واجباتك الجامعية (نتائج جزئية):" : "📚 واجباتك الجامعية:" };
+        foreach (var group in ordered.GroupBy(a => a.Course))
+        {
+            lines.Add($"\n📖 {group.Key}");
+            foreach (var assignment in group)
+            {
+                var state = assignment.DueDateKnowledge switch
+                {
+                    MoodleDateKnowledge.NoDeadline => "لا يوجد موعد نهائي",
+                    MoodleDateKnowledge.Unknown => "موعد التسليم غير متاح",
+                    _ when MoodleAssignmentExtractor.IsOverdue(assignment, now) => $"متأخر — {assignment.DueAt:dd MMM yyyy HH:mm}",
+                    _ => $"{assignment.DueAt:dd MMM yyyy HH:mm} ({(assignment.DueAt < now ? "انتهى الموعد" : "قادم")})"
+                };
+                var status = assignment.Status switch
+                {
+                    MoodleAssignmentStatus.NotSubmitted => "لم يتم التسليم",
+                    MoodleAssignmentStatus.Draft => "مسودة غير مسلّمة",
+                    MoodleAssignmentStatus.Submitted => "تم التسليم",
+                    MoodleAssignmentStatus.SubmittedLate => "تم التسليم متأخراً",
+                    MoodleAssignmentStatus.NeedsRevision => "يحتاج إلى تعديل",
+                    MoodleAssignmentStatus.Graded => "تم التقييم",
+                    _ => "حالة التسليم غير متاحة"
+                };
+                lines.Add($"• {assignment.Title}\n  الموعد: {state}\n  الحالة: {status}");
+                if (assignment.AvailableFrom.HasValue) lines.Add($"  متاح من: {assignment.AvailableFrom:dd MMM yyyy HH:mm}");
+                if (assignment.CutoffAt.HasValue) lines.Add($"  آخر موعد للإغلاق: {assignment.CutoffAt:dd MMM yyyy HH:mm}");
+                if (assignment.SubmittedAt.HasValue) lines.Add($"  وقت التسليم: {assignment.SubmittedAt:dd MMM yyyy HH:mm}");
+                lines.Add($"  {assignment.Url}");
+            }
+        }
+        return string.Join("\n", lines);
+    }
 
     private enum LinkStep { StudentId, Password }
     private sealed record LinkFlow(LinkStep Step, string? StudentId, DateTimeOffset StartedAt);
