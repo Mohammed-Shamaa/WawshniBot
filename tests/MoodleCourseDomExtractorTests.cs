@@ -6,17 +6,49 @@ namespace Wawshni.Bot.Tests;
 public sealed class MoodleCourseDomExtractorTests
 {
     [Fact]
-    public void Normalizes_visible_course_link_names_and_removes_duplicates()
+    public void Removes_course_label_and_deduplicates_whitespace_and_label_variants()
     {
         var names = MoodleCourseDomExtractor.NormalizeNames(
         [
-            "  Algorithms\r\n and Data Structures ",
-            "Algorithms and Data Structures",
+            "  الحوسبة المنتشرة   - عملي ",
+            "اسم المقرر الحوسبة المنتشرة - عملي",
+            "اسم المقرر: الحوسبة المنتشرة - عملي",
+            "اسم المقرر\r\n الحوسبة المنتشرة - عملي",
+            "الحوسبة المنتشرة | م. محمد أحمد الأغا",
+            "اسم المقرر الحوسبة المنتشرة | م. محمد أحمد الأغا",
             "  ",
-            "Networks"
+            "Networks",
+            " networks "
         ]);
 
-        Assert.Equal(new[] { "Algorithms and Data Structures", "Networks" }, names);
+        Assert.Equal(new[]
+        {
+            "الحوسبة المنتشرة - عملي",
+            "الحوسبة المنتشرة | م. محمد أحمد الأغا",
+            "Networks"
+        }, names);
+    }
+
+    [Fact]
+    public void Keeps_similar_but_distinct_course_names_and_does_not_remove_embedded_phrase()
+    {
+        var names = MoodleCourseDomExtractor.NormalizeNames(
+        [
+            "برمجة تطبيقات الأجهزة الذكية (3)",
+            "اسم المقرر برمجة تطبيقات الأجهزة الذكية (3) -عملي",
+            "مشروع تخرج",
+            "مشروع تخرج - تصميم",
+            "مقدمة: اسم المقرر وكيفية التسجيل"
+        ]);
+
+        Assert.Equal(new[]
+        {
+            "برمجة تطبيقات الأجهزة الذكية (3)",
+            "برمجة تطبيقات الأجهزة الذكية (3) -عملي",
+            "مشروع تخرج",
+            "مشروع تخرج - تصميم",
+            "مقدمة: اسم المقرر وكيفية التسجيل"
+        }, names);
     }
 
     [Fact]
