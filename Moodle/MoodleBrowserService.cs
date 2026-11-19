@@ -4,7 +4,7 @@ using Microsoft.Playwright;
 
 namespace Wawshni.Bot.Moodle;
 
-public enum MoodleLinkResultKind { Success, InvalidCredentials, ChallengeRequired, IdentityUnverified, NotConfigured, Unavailable, Expired }
+public enum MoodleLinkResultKind { Success, InvalidCredentials, ChallengeRequired, IdentityUnverified, NotConfigured, Unavailable, Expired, NoCourses, CoursesNotDetected, UnexpectedRedirect, DashboardRedirect }
 public sealed record MoodleLinkResult(MoodleLinkResultKind Kind, IReadOnlyList<string> Courses, bool CoursesRetrieved);
 public sealed record MoodleStatusResult(bool Connected, bool Expired);
 
@@ -130,8 +130,10 @@ public sealed class MoodleBrowserService(
         await gate.WaitAsync(cancellationToken);
         try
         {
+            logger.LogInformation("Starting Moodle course retrieval; loading the authorized account's encrypted browser session.");
             var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
             if (stored is null) return new(MoodleLinkResultKind.Expired, [], false);
+            logger.LogInformation("Encrypted Moodle session record was found.");
             return await WithStoredSessionAsync(stored, async page =>
             {
                 return await ReadCoursesOnPageAsync(page, cancellationToken);
@@ -139,7 +141,8 @@ public sealed class MoodleBrowserService(
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogWarning("Moodle course retrieval failed ({ExceptionType}).", exception.GetType().Name);
+            logger.LogError("Moodle course retrieval failed ({ExceptionType}). Safe message: {SafeMessage}. Stack trace: {StackTrace}",
+                exception.GetType().FullName, SafeExceptionMessage(exception), exception.StackTrace);
             return new(MoodleLinkResultKind.Unavailable, [], false);
         }
         finally { gate.Release(); }
@@ -147,10 +150,16 @@ public sealed class MoodleBrowserService(
 
     private async Task<T> WithStoredSessionAsync<T>(StoredMoodleSession stored, Func<IPage, Task<T>> action, CancellationToken cancellationToken)
     {
+        logger.LogInformation("Decrypting the saved Moodle browser state in memory.");
         var state = crypto.Decrypt(stored.TelegramUserId, stored.Encrypted);
+        logger.LogInformation("Moodle browser state decrypted successfully; values are not logged.");
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true, Args = ["--no-sandbox", "--disable-dev-shm-usage"] });
         var context = await browser.NewContextAsync(new BrowserNewContextOptions { StorageState = state });
+        var cookies = await context.CookiesAsync();
+        using var storage = System.Text.Json.JsonDocument.Parse(state);
+        var originCount = storage.RootElement.TryGetProperty("origins", out var origins) && origins.ValueKind == System.Text.Json.JsonValueKind.Array ? origins.GetArrayLength() : 0;
+        logger.LogInformation("Playwright context created with persisted storage state (cookie count {CookieCount}, origin count {OriginCount}); cookie values omitted.", cookies.Count, originCount);
         try
         {
             var page = await context.NewPageAsync();
@@ -160,14 +169,115 @@ public sealed class MoodleBrowserService(
         finally { await context.CloseAsync(); }
     }
 
-    private static async Task<MoodleLinkResult> ReadCoursesOnPageAsync(IPage page, CancellationToken cancellationToken)
+    private async Task<MoodleLinkResult> ReadCoursesOnPageAsync(IPage page, CancellationToken cancellationToken)
     {
-        await page.GotoAsync(new Uri(new Uri(page.Url), "/my/courses.php").ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 15_000 });
-        if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase))
-            return new(MoodleLinkResultKind.Success, [], false);
-        var links = page.Locator("a[href*='/course/view.php?id=']");
-        var names = (await links.AllInnerTextsAsync()).Select(x => x.Trim()).Where(x => x.Length > 0).Distinct(StringComparer.Ordinal).Take(50).ToArray();
-        return new(MoodleLinkResultKind.Success, names, true);
+        // A newly restored context starts at about:blank. Always derive the target from configured Moodle BaseUrl.
+        var target = MoodleCoursePageUrl.FromBaseUrl(options.Value.BaseUrl);
+        logger.LogInformation("Navigating Playwright to Moodle courses page {TargetUrl}.", SafeUrl(target.ToString()));
+        var response = await page.GotoAsync(target.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 25_000 });
+        var statusCode = response?.Status;
+        logger.LogInformation("Moodle courses navigation completed: final URL {FinalUrl}; HTTP status {StatusCode}.", SafeUrl(page.Url), statusCode?.ToString() ?? "unavailable");
+
+        if (!IsUniversityHost(page.Url))
+        {
+            logger.LogWarning("Moodle courses navigation left the university domain; final URL {FinalUrl}.", SafeUrl(page.Url));
+            return new(MoodleLinkResultKind.UnexpectedRedirect, [], false);
+        }
+        if (page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogWarning("Restored Moodle session was redirected to the login page.");
+            return new(MoodleLinkResultKind.Expired, [], false);
+        }
+        if (statusCode is >= 400)
+        {
+            logger.LogWarning("Moodle courses endpoint returned HTTP {StatusCode}.", statusCode);
+            return new(MoodleLinkResultKind.Unavailable, [], false);
+        }
+
+        const string linksSelector = "a[href*='course/view.php']";
+        var links = page.Locator(linksSelector).Visible;
+        try
+        {
+            await links.First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 12_000 });
+        }
+        catch (PlaywrightException)
+        {
+            // Some Moodle pages render the course list asynchronously; collect a safe DOM summary below.
+        }
+
+        var linkCount = await links.CountAsync();
+        var legacyCardCount = await page.Locator(".coursebox").CountAsync();
+        var dashboardCardCount = await page.Locator(".dashboard-card").CountAsync();
+        var courseContentCount = await page.Locator("[data-region='course-content-item'], [data-region='course-content'] .card").CountAsync();
+        logger.LogInformation("Moodle course DOM summary: matching course links {LinkCount}, legacy cards {LegacyCardCount}, dashboard cards {DashboardCardCount}, course content items {CourseContentCount}.", linkCount, legacyCardCount, dashboardCardCount, courseContentCount);
+
+        if (linkCount == 0)
+        {
+            var pagePath = new Uri(page.Url).AbsolutePath;
+            logger.LogWarning("No recognized course links appeared after waiting for dynamic content. Page path: {PagePath}; candidate counts: legacy={LegacyCount}, dashboard={DashboardCount}, content={ContentCount}.", SafePath(pagePath), legacyCardCount, dashboardCardCount, courseContentCount);
+            if (await HasExplicitEmptyCourseMessageAsync(page))
+            {
+                logger.LogInformation("Moodle displayed an explicit empty-course message.");
+                return new(MoodleLinkResultKind.NoCourses, [], true);
+            }
+            if (pagePath.TrimEnd('/').Equals("/my", StringComparison.OrdinalIgnoreCase)
+                || pagePath.Equals("/my/index.php", StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogWarning("Moodle redirected the courses request to the dashboard without rendering course links.");
+                return new(MoodleLinkResultKind.DashboardRedirect, [], false);
+            }
+            return new(MoodleLinkResultKind.CoursesNotDetected, [], false);
+        }
+
+        var names = MoodleCourseDomExtractor.NormalizeNames(await links.AllInnerTextsAsync());
+        logger.LogInformation("Moodle course extraction completed; extracted {CourseCount} course names.", names.Count);
+        return names.Count == 0
+            ? new(MoodleLinkResultKind.CoursesNotDetected, [], false)
+            : new(MoodleLinkResultKind.Success, names, true);
+    }
+
+    private static async Task<bool> HasExplicitEmptyCourseMessageAsync(IPage page)
+    {
+        var emptyMessage = page.Locator("[data-region='empty-message'], .empty-state, .no-courses");
+        if (await emptyMessage.CountAsync() > 0)
+        {
+            var text = string.Join(" ", await emptyMessage.AllInnerTextsAsync());
+            if (ContainsExplicitEmptyMessage(text)) return true;
+        }
+
+        var alerts = page.Locator("[role='alert'], .alert-info");
+        var alertText = string.Join(" ", await alerts.AllInnerTextsAsync());
+        return ContainsExplicitEmptyMessage(alertText);
+    }
+
+    private static bool ContainsExplicitEmptyMessage(string text) =>
+        text.Contains("you are not enrolled in any courses", StringComparison.OrdinalIgnoreCase)
+        || text.Contains("no courses available", StringComparison.OrdinalIgnoreCase)
+        || text.Contains("no courses found", StringComparison.OrdinalIgnoreCase)
+        || text.Contains("لا توجد مساقات", StringComparison.OrdinalIgnoreCase)
+        || text.Contains("لا يوجد مساقات", StringComparison.OrdinalIgnoreCase)
+        || text.Contains("لا توجد مقررات", StringComparison.OrdinalIgnoreCase);
+
+    private static string SafeUrl(string value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)) return "unavailable";
+        // Keep origin and path for redirect diagnosis; never include user info, query, or fragment values.
+        return $"{uri.Scheme}://{uri.Host}{SafePath(uri.AbsolutePath)}";
+    }
+
+    private static string SafePath(string path) =>
+        System.Text.RegularExpressions.Regex.Replace(path, @"/(?=[A-Za-z0-9_-]{20,}(?:/|$))[A-Za-z0-9_-]+", "/[redacted]");
+
+    private static string SafeExceptionMessage(Exception exception)
+    {
+        var message = System.Text.RegularExpressions.Regex.Replace(
+            exception.Message,
+            @"https?://[^\s""'<>]+",
+            match => SafeUrl(match.Value.TrimEnd(',', '.', ')', ']')));
+        return System.Text.RegularExpressions.Regex.Replace(
+            message,
+            @"(?i)\b(password|passwd|token|cookie|set-cookie|authorization|sesskey|session|samlresponse|assertion)\b\s*[:=]\s*[^,;\s&]+",
+            "$1=[redacted]");
     }
 
     private static async Task<bool> HasInteractiveChallengeAsync(IPage page)

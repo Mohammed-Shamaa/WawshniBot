@@ -12,4 +12,8 @@
     <PackageReference Include="Microsoft.Playwright" Version="1.64.1" />
     <PackageReference Include="Telegram.Bot" Version="22.5.1" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
 </Project>

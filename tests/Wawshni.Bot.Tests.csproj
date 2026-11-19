@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Integration/**/*.cs" />
+    <Compile Include="..\Moodle\MoodleSessionCrypto.cs" Link="Moodle\MoodleSessionCrypto.cs" />
+    <Compile Include="..\Moodle\MoodleConnectionStatus.cs" Link="Moodle\MoodleConnectionStatus.cs" />
+    <Compile Include="..\Moodle\MoodleCourseDomExtractor.cs" Link="Moodle\MoodleCourseDomExtractor.cs" />
+  </ItemGroup>
+</Project>

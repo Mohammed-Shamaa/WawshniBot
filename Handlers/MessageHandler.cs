@@ -154,6 +154,10 @@ public sealed class MessageHandler(
 
     private static string FormatLinkResult(MoodleLinkResult result) => result.Kind switch
     {
+        MoodleLinkResultKind.NoCourses => "تم التحقق من الحساب وحفظ الجلسة المشفّرة، وأظهرت صفحة Moodle رسالة صريحة بعدم وجود مساقات مسجلة حالياً.",
+        MoodleLinkResultKind.CoursesNotDetected => "تم التحقق من الحساب وحفظ الجلسة المشفّرة، لكن لم أتعرف على عناصر المساقات في الصفحة. هذا لا يعني أن حسابك بلا مساقات؛ راجع سجل التشخيص ثم أرسل /my_courses لاحقاً.",
+        MoodleLinkResultKind.UnexpectedRedirect => "تم التحقق من الحساب وحفظ الجلسة، لكن Moodle حوّل طلب المساقات إلى صفحة غير متوقعة. تحقق عبر /status ثم أعد المحاولة.",
+        MoodleLinkResultKind.DashboardRedirect => "تم التحقق من الحساب وحفظ الجلسة، لكن صفحة المساقات أعادت توجيهي إلى لوحة Moodle. لم أعتبر ذلك دليلاً على عدم وجود مساقات.",
         MoodleLinkResultKind.Success when result.CoursesRetrieved => result.Courses.Count == 0
             ? "تم التحقق من حساب Moodle وحفظ الجلسة المشفّرة. لم تظهر مساقات مسجلة حالياً. أرسل /my_courses للمحاولة لاحقاً."
             : "تم ربط حساب Moodle وحفظ الجلسة المشفّرة. مساقاتك المسجلة:\n• " + string.Join("\n• ", result.Courses),
@@ -169,7 +173,10 @@ public sealed class MessageHandler(
     private static string FormatCourses(MoodleLinkResult result) => result.Kind switch
     {
         MoodleLinkResultKind.Expired => "الجلسة غير موجودة أو انتهت. أرسل /link لإعادة الربط.",
-        MoodleLinkResultKind.Success when result.CoursesRetrieved && result.Courses.Count == 0 => "لم تظهر مساقات مسجلة في حسابك حالياً.",
+        MoodleLinkResultKind.NoCourses => "أظهرت صفحة Moodle رسالة صريحة بعدم وجود مساقات مسجلة حالياً.",
+        MoodleLinkResultKind.CoursesNotDetected => "تم فتح حساب Moodle، لكن لم أتعرف على عناصر المساقات في الصفحة. هذا لا يعني أن حسابك بلا مساقات؛ تم تسجيل معلومات تشخيصية آمنة للمراجعة.",
+        MoodleLinkResultKind.UnexpectedRedirect => "حوّل Moodle طلب المساقات إلى صفحة غير متوقعة. تحقق من الجلسة عبر /status ثم أعد المحاولة.",
+        MoodleLinkResultKind.DashboardRedirect => "حوّل Moodle طلب المساقات إلى لوحة الحساب دون ظهور قائمة المساقات. لم أعتبر ذلك دليلاً على عدم وجود مساقات.",
         MoodleLinkResultKind.Success when result.CoursesRetrieved => "مساقاتك المسجلة في Moodle:\n• " + string.Join("\n• ", result.Courses),
         _ => "تعذر جلب المساقات من Moodle. أرسل /status للتحقق من الجلسة أو /link لإعادة الربط."
     };
