@@ -21,6 +21,7 @@ public sealed class MoodleBrowserService(
     {
         var gate = _userLocks.GetOrAdd(telegramUserId, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken);
+        var stage = "browser-initialization";
         try
         {
             if (string.IsNullOrWhiteSpace(options.Value.SessionEncryptionKey)) return new(MoodleLinkResultKind.NotConfigured, [], false);
@@ -36,23 +37,28 @@ public sealed class MoodleBrowserService(
             try
             {
                 var page = await context.NewPageAsync();
-                page.SetDefaultTimeout(10_000);
+                page.SetDefaultTimeout(20_000);
+                stage = "login-page-navigation";
                 await page.GotoAsync(new Uri(options.Value.BaseUrl, "login/index.php").ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
                 if (!IsUniversityHost(page.Url)) return new(MoodleLinkResultKind.Unavailable, [], false);
+                stage = "sso-link-discovery";
                 var sso = page.Locator("a[href*='/auth/saml2/login.php']");
                 if (await sso.CountAsync() == 0)
                     return new(MoodleLinkResultKind.Unavailable, [], false);
+                stage = "sso-navigation";
                 await sso.First.ClickAsync();
                 await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = 20_000 }).ContinueOnTimeout();
                 if (!IsUniversityHost(page.Url)) return new(MoodleLinkResultKind.Unavailable, [], false);
                 if (await HasInteractiveChallengeAsync(page)) return new(MoodleLinkResultKind.ChallengeRequired, [], false);
 
+                stage = "credential-form-discovery";
                 var passwordInput = page.Locator("input[type='password']").First;
                 if (await page.Locator("input[type='password']").CountAsync() == 0)
                     return new(MoodleLinkResultKind.Unavailable, [], false);
                 var usernameInput = page.Locator("input#username, input[name='username'], input[name*='user' i], input[type='email'], input[type='text']").First;
                 if (await page.Locator("input#username, input[name='username'], input[name*='user' i], input[type='email'], input[type='text']").CountAsync() == 0)
                     return new(MoodleLinkResultKind.Unavailable, [], false);
+                stage = "credential-form-submit";
                 await usernameInput.FillAsync(studentId);
                 await passwordInput.FillAsync(password);
                 var submit = page.Locator("button[type='submit'], input[type='submit']").First;
@@ -63,6 +69,7 @@ public sealed class MoodleBrowserService(
                 if (!IsUniversityHost(page.Url)) return new(MoodleLinkResultKind.Unavailable, [], false);
                 if (await HasInteractiveChallengeAsync(page)) return new(MoodleLinkResultKind.ChallengeRequired, [], false);
 
+                stage = "authenticated-profile-validation";
                 var profileUrl = new Uri(options.Value.BaseUrl, "user/profile.php");
                 await page.GotoAsync(profileUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
                 // This context starts without cookies, and the student ID above was submitted to the IUG login form.
@@ -72,6 +79,7 @@ public sealed class MoodleBrowserService(
                     && await page.Locator("a[href*='logout'], a[href*='login/logout.php'], #user-menu-toggle, [data-region='user-menu']").CountAsync() > 0;
                 if (!authenticated) return new(MoodleLinkResultKind.InvalidCredentials, [], false);
 
+                stage = "session-persistence";
                 var state = await context.StorageStateAsync();
                 var encrypted = crypto.Encrypt(telegramUserId, state);
                 await sessions.SaveAsync(telegramUserId, studentId, encrypted, timeout.Token);
@@ -93,9 +101,14 @@ public sealed class MoodleBrowserService(
         {
             return new(MoodleLinkResultKind.NotConfigured, [], false);
         }
+        catch (TimeoutException exception)
+        {
+            logger.LogWarning("Moodle login timed out during stage {Stage} ({ExceptionType}).", stage, exception.GetType().Name);
+            return new(MoodleLinkResultKind.Unavailable, [], false);
+        }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogWarning("Moodle login or session operation failed ({ExceptionType}).", exception.GetType().Name);
+            logger.LogWarning("Moodle login or session operation failed during stage {Stage} ({ExceptionType}).", stage, exception.GetType().Name);
             return new(MoodleLinkResultKind.Unavailable, [], false);
         }
         finally { gate.Release(); }
