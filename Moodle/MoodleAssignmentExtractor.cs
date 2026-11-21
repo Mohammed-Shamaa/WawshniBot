@@ -20,9 +20,26 @@ public sealed record MoodleAssignment(
 public sealed record MoodleAssignmentLink(string Href, string Title);
 public sealed record MoodleAssignmentsResult(MoodleAssignmentsResultKind Kind, IReadOnlyList<MoodleAssignment> Assignments);
 
+public sealed class MoodleAssignmentPageSnapshot
+{
+    public string Title { get; set; } = "";
+    public string Body { get; set; } = "";
+    public string Description { get; set; } = "";
+    public List<MoodleAssignmentPageTime> TimeValues { get; set; } = [];
+    public List<MoodleAssignmentPageRow> Rows { get; set; } = [];
+}
+
+public sealed class MoodleAssignmentPageTime { public string Label { get; set; } = ""; public string? Value { get; set; } }
+public sealed class MoodleAssignmentPageRow { public string Label { get; set; } = ""; public string Value { get; set; } = ""; public string? Iso { get; set; } }
+
 /// <summary>Maps authenticated Moodle page data to user-facing assignment records.</summary>
 public static class MoodleAssignmentExtractor
 {
+    public static MoodleAssignmentPageSnapshot ParsePageSnapshot(string json) =>
+        System.Text.Json.JsonSerializer.Deserialize<MoodleAssignmentPageSnapshot>(
+            json, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))
+        ?? throw new System.Text.Json.JsonException("Moodle assignment page returned an empty DOM snapshot.");
+
     public static string NormalizeTitle(string? title) => string.IsNullOrWhiteSpace(title) ? string.Empty : Regex.Replace(title, @"\s+", " ").Trim();
 
     public static MoodleAssignmentStatus MapStatus(string? text)

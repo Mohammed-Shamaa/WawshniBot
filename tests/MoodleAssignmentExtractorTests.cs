@@ -109,6 +109,26 @@ public sealed class MoodleAssignmentExtractorTests
         Assert.DoesNotContain(links, link => link.Href.Contains("/mod/quiz/", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void Assignment_dom_snapshot_accepts_missing_dates_without_failing_conversion()
+    {
+        const string json = """{"title":"واجب تجريبي","body":"","description":"تفاصيل","timeValues":[{"label":"Due date","value":null}],"rows":[{"label":"Submission status","value":"Nothing submitted","iso":null}]}""";
+
+        var snapshot = MoodleAssignmentExtractor.ParsePageSnapshot(json);
+
+        Assert.Equal("واجب تجريبي", snapshot.Title);
+        Assert.Null(snapshot.TimeValues[0].Value);
+        Assert.Null(snapshot.Rows[0].Iso);
+        Assert.Equal("Nothing submitted", snapshot.Rows[0].Value);
+    }
+
+    [Fact]
+    public void Malformed_assignment_dom_snapshot_fails_explicitly()
+    {
+        Assert.Throws<System.Text.Json.JsonException>(() => MoodleAssignmentExtractor.ParsePageSnapshot("{malformed"));
+        Assert.Throws<System.Text.Json.JsonException>(() => MoodleAssignmentExtractor.ParsePageSnapshot("null"));
+    }
+
     private static MoodleAssignment Assignment(string title, string url, DateTimeOffset? due = null, MoodleDateKnowledge? knowledge = null) =>
         new(title, "مساق", url, null, due, knowledge ?? (due.HasValue ? MoodleDateKnowledge.Known : MoodleDateKnowledge.NoDeadline), null, null, MoodleAssignmentStatus.NotSubmitted, null);
 }
