@@ -115,7 +115,9 @@ public sealed class MessageHandler(
                 }
                 response = status.Connected
                     ? "حساب Moodle مربوط والجلسة صالحة حالياً. أرسل /my_courses لعرض المساقات."
-                    : status.Expired ? "انتهت جلسة Moodle أو تعذر التحقق منها. أرسل /link لإعادة الربط." : "حساب Moodle غير مربوط. أرسل /link للبدء.";
+                    : status.Expired ? "انتهت جلسة Moodle. أرسل /link لإعادة الربط."
+                    : status.Unavailable ? "تعذر الاتصال بـ Moodle للتحقق من الجلسة حالياً. احتفظت بالجلسة المخزنة؛ حاول مرة أخرى لاحقاً."
+                    : "حساب Moodle غير مربوط. أرسل /link للبدء.";
                 break;
             case "/my_courses":
             case "/courses":

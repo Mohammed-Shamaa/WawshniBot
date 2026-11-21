@@ -6,7 +6,7 @@ namespace Wawshni.Bot.Moodle;
 
 public enum MoodleLinkResultKind { Success, InvalidCredentials, ChallengeRequired, IdentityUnverified, NotConfigured, Unavailable, Expired, NoCourses, CoursesNotDetected, UnexpectedRedirect, DashboardRedirect }
 public sealed record MoodleLinkResult(MoodleLinkResultKind Kind, IReadOnlyList<string> Courses, bool CoursesRetrieved);
-public sealed record MoodleStatusResult(bool Connected, bool Expired);
+public sealed record MoodleStatusResult(bool Connected, bool Expired, bool Unavailable = false);
 
 /// <summary>Runs short-lived Chromium contexts only for account linking and Moodle commands.</summary>
 public sealed class MoodleBrowserService(
@@ -111,15 +111,29 @@ public sealed class MoodleBrowserService(
             if (stored is null) return new(false, false);
             return await WithStoredSessionAsync(stored, async page =>
             {
-                await page.GotoAsync(new Uri(options.Value.BaseUrl, "my/").ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 15_000 });
-                var valid = IsUniversityHost(page.Url) && !page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase);
-                return new MoodleStatusResult(valid, !valid);
+                IResponse? response;
+                try
+                {
+                    response = await page.GotoAsync(new Uri(options.Value.BaseUrl, "my/").ToString(),
+                        new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 25_000 });
+                }
+                catch (TimeoutException exception)
+                {
+                    logger.LogWarning("Moodle session check timed out while opening the dashboard ({ExceptionType}); the saved session was retained.", exception.GetType().Name);
+                    return new MoodleStatusResult(false, false, true);
+                }
+
+                if (page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase))
+                    return new MoodleStatusResult(false, true);
+                if (!IsUniversityHost(page.Url) || response?.Status is >= 400)
+                    return new MoodleStatusResult(false, false, true);
+                return new MoodleStatusResult(true, false);
             }, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogWarning("Moodle session check failed ({ExceptionType}).", exception.GetType().Name);
-            return new(false, true);
+            logger.LogWarning("Moodle session check failed ({ExceptionType}); the saved session was retained.", exception.GetType().Name);
+            return new(false, false, true);
         }
         finally { gate.Release(); }
     }
