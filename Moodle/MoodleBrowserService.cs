@@ -84,8 +84,17 @@ public sealed class MoodleBrowserService(
                 stage = "session-persistence";
                 var state = await context.StorageStateAsync();
                 var encrypted = crypto.Encrypt(telegramUserId, state);
-                await sessions.SaveAsync(telegramUserId, studentId, encrypted, timeout.Token);
+                // Moodle navigation may consume the whole interaction timeout. Keep persistence
+                // independent so an authenticated session is not discarded because course
+                // discovery took too long.
+                await sessions.SaveAsync(telegramUserId, studentId, encrypted, cancellationToken);
+                stage = "initial-course-retrieval";
                 try { return await ReadCoursesOnPageAsync(page, timeout.Token); }
+                catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    logger.LogWarning("Moodle account was authenticated and its session saved, but initial course retrieval timed out.");
+                    return new(MoodleLinkResultKind.Success, [], false);
+                }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     logger.LogWarning("Moodle login succeeded but course retrieval failed ({ExceptionType}).", exception.GetType().Name);
@@ -94,9 +103,9 @@ public sealed class MoodleBrowserService(
             }
             finally { await context.CloseAsync(); }
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            logger.LogWarning("Moodle operation timed out.");
+            logger.LogWarning("Moodle link operation timed out during stage {Stage} ({ExceptionType}).", stage, exception.GetType().Name);
             return new(MoodleLinkResultKind.Unavailable, [], false);
         }
         catch (InvalidOperationException exception) when (exception.Message.Contains("not configured", StringComparison.OrdinalIgnoreCase))
