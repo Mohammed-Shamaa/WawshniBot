@@ -25,6 +25,7 @@ builder.Services.AddSingleton<MessageHandler>();
 builder.Services.AddSingleton<TelegramBotService>();
 builder.Services.AddSingleton<NeonDatabaseReadiness>();
 builder.Services.AddHostedService<Worker>();
+builder.Services.AddHostedService<SelfKeepAliveService>();
 
 var app = builder.Build();
 app.MapGet("/health", () => Results.Json(new { status = "ok" }));

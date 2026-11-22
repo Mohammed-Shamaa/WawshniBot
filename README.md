@@ -42,10 +42,12 @@ The GitHub repository root is the project root. Create a Docker Web Service from
 - `Moodle__LoginTimeoutSeconds=45`
 - `Moodle__SessionEncryptionKey` = Base64 encoding of 32 random bytes, generated for example with `openssl rand -base64 32`; `Moodle__SessionEncryptionKeyVersion=1`. Store keys only in Render and back them up securely. For rotation, increment the version and retain old values as `Moodle__PreviousSessionEncryptionKeys__1` until old session rows are removed or re-encrypted.
 - `Moodle__ScanIntervalMinutes=10`
+- `KeepAlive__Url=https://wawshnibot.onrender.com/health`
+- `KeepAlive__IntervalMinutes=10` (optional; clamped to 5–14 minutes)
 
 Render supplies `PORT`; the app binds to `0.0.0.0` on that port. Verify the deployment with `/health` (liveness) and `/health/ready` (database connection). The readiness response never includes a connection string or exception details.
 
-An external health monitor may request `/health` every 10 minutes to reduce idle spin-down. This cannot prevent Render restarts or guarantee 24/7 uptime. Render's filesystem is ephemeral; `.env.local` is for local development only. Persistent application data must be stored in the database.
+The optional self keep-alive requests the configured public `/health` URL every 10 minutes while the process is running. This may reduce idle spin-down on plans that allow it, but cannot wake an already stopped service or override Render's free-plan suspension policy, maintenance, or restarts; it does not guarantee 24/7 uptime. Render's filesystem is ephemeral; `.env.local` is for local development only. Persistent application data must be stored in the database.
 
 ## Telegram commands
 

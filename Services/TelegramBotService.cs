@@ -36,8 +36,16 @@ public sealed class TelegramBotService : IUpdateHandler
             : Task.CompletedTask;
     public Task HandleErrorAsync(ITelegramBotClient botClient, Exception exception, HandleErrorSource source, CancellationToken cancellationToken)
     {
-        if (exception is ApiRequestException { ErrorCode: 409 })
-            _logger.LogError("Telegram polling conflict (HTTP 409) while handling {Source}; another process is using getUpdates with this bot token.", source);
+        if (exception is ApiRequestException { ErrorCode: 409 } conflict)
+        {
+            var description = conflict.Message;
+            var cause = description.Contains("webhook", StringComparison.OrdinalIgnoreCase)
+                ? "active-webhook"
+                : description.Contains("getupdates", StringComparison.OrdinalIgnoreCase)
+                    ? "another-poller"
+                    : "unknown-conflict";
+            _logger.LogError("Telegram polling conflict (HTTP 409, {Cause}) while handling {Source}.", cause, source);
+        }
         else if (exception is ApiRequestException apiException) _logger.LogError("Telegram API error {ErrorCode} while handling {Source}.", apiException.ErrorCode, source);
         else _logger.LogError("Telegram polling error of type {ExceptionType} from {Source}.", exception.GetType().Name, source);
         return Task.CompletedTask;

@@ -26,7 +26,8 @@ public sealed class MoodleBrowserService(
         {
             if (string.IsNullOrWhiteSpace(options.Value.SessionEncryptionKey)) return new(MoodleLinkResultKind.NotConfigured, [], false);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(options.Value.LoginTimeoutSeconds, 15, 120)));
+            var loginTimeoutMs = Math.Clamp(options.Value.LoginTimeoutSeconds, 15, 120) * 1000;
+            timeout.CancelAfter(TimeSpan.FromMilliseconds(loginTimeoutMs));
             using var playwright = await Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
             {
@@ -38,8 +39,9 @@ public sealed class MoodleBrowserService(
             {
                 var page = await context.NewPageAsync();
                 page.SetDefaultTimeout(20_000);
+                page.SetDefaultNavigationTimeout(loginTimeoutMs);
                 stage = "login-page-navigation";
-                await page.GotoAsync(new Uri(options.Value.BaseUrl, "login/index.php").ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
+                await page.GotoAsync(new Uri(options.Value.BaseUrl, "login/index.php").ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = loginTimeoutMs });
                 if (!IsUniversityHost(page.Url)) return new(MoodleLinkResultKind.Unavailable, [], false);
                 stage = "sso-link-discovery";
                 var sso = page.Locator("a[href*='/auth/saml2/login.php']");
@@ -47,7 +49,7 @@ public sealed class MoodleBrowserService(
                     return new(MoodleLinkResultKind.Unavailable, [], false);
                 stage = "sso-navigation";
                 await sso.First.ClickAsync();
-                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = 20_000 }).ContinueOnTimeout();
+                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = loginTimeoutMs }).ContinueOnTimeout();
                 if (!IsUniversityHost(page.Url)) return new(MoodleLinkResultKind.Unavailable, [], false);
                 if (await HasInteractiveChallengeAsync(page)) return new(MoodleLinkResultKind.ChallengeRequired, [], false);
 
@@ -65,13 +67,13 @@ public sealed class MoodleBrowserService(
                 if (await page.Locator("button[type='submit'], input[type='submit']").CountAsync() == 0)
                     return new(MoodleLinkResultKind.Unavailable, [], false);
                 await submit.ClickAsync();
-                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = 20_000 }).ContinueOnTimeout();
+                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = loginTimeoutMs }).ContinueOnTimeout();
                 if (!IsUniversityHost(page.Url)) return new(MoodleLinkResultKind.Unavailable, [], false);
                 if (await HasInteractiveChallengeAsync(page)) return new(MoodleLinkResultKind.ChallengeRequired, [], false);
 
                 stage = "authenticated-profile-validation";
                 var profileUrl = new Uri(options.Value.BaseUrl, "user/profile.php");
-                await page.GotoAsync(profileUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
+                await page.GotoAsync(profileUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = loginTimeoutMs });
                 // This context starts without cookies, and the student ID above was submitted to the IUG login form.
                 // Moodle's profile page does not necessarily display usernames, so authenticate via its session marker.
                 var authenticated = IsUniversityHost(page.Url)
