@@ -95,4 +95,20 @@ public sealed class MoodleCourseDomExtractorTests
 
         Assert.Empty(links);
     }
+
+    [Fact]
+    public void Assignment_course_options_keep_course_ids_and_normalized_names()
+    {
+        var normalized = MoodleCourseDomExtractor.NormalizeLinks(
+        [
+            new MoodleCourseLink("اسم المقرر برمجة الألعاب للأجهزة الذكية", "https://moodle.iugaza.edu.ps/course/view.php?id=77771"),
+            new MoodleCourseLink("برمجة الألعاب للأجهزة الذكية", "https://moodle.iugaza.edu.ps/course/view.php?id=77771&section=2"),
+            new MoodleCourseLink("بحث تخرج", "https://moodle.iugaza.edu.ps/course/view.php?id=81234")
+        ], new Uri("https://moodle.iugaza.edu.ps/"));
+
+        var courses = MoodleCourseDomExtractor.ToAssignmentOptions(normalized);
+
+        Assert.Equal(new[] { 77771, 81234 }, courses.Select(course => course.Id));
+        Assert.Equal(new[] { "برمجة الألعاب للأجهزة الذكية", "بحث تخرج" }, courses.Select(course => course.Name));
+    }
 }

@@ -53,6 +53,21 @@ public static class MoodleCourseDomExtractor
         return normalized.Values.ToList();
     }
 
+    public static IReadOnlyList<MoodleAssignmentCourse> ToAssignmentOptions(IEnumerable<MoodleCourseLink> links)
+    {
+        var options = new List<MoodleAssignmentCourse>();
+        var seen = new HashSet<int>();
+        foreach (var link in links)
+        {
+            if (!Uri.TryCreate(link.Href, UriKind.Absolute, out var uri)) continue;
+            var idText = System.Web.HttpUtility.ParseQueryString(uri.Query)["id"];
+            if (!int.TryParse(idText, out var id) || id <= 0 || !seen.Add(id)) continue;
+            var name = NormalizeNames([link.Name]).FirstOrDefault();
+            options.Add(new MoodleAssignmentCourse(id, string.IsNullOrWhiteSpace(name) ? $"مساق {id}" : name));
+        }
+        return options;
+    }
+
     private static string NormalizeWhitespace(string value) =>
         System.Text.RegularExpressions.Regex.Replace(value, @"\s+", " ").Trim().Normalize();
 }

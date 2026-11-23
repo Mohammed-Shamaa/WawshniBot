@@ -186,16 +186,47 @@ public sealed class MoodleBrowserService(
         finally { gate.Release(); }
     }
 
-    public async Task<MoodleAssignmentsResult> GetAssignmentsAsync(long telegramUserId, CancellationToken cancellationToken)
+    public async Task<MoodleAssignmentCourseListResult> GetAssignmentCoursesAsync(long telegramUserId, CancellationToken cancellationToken)
     {
         var gate = _userLocks.GetOrAdd(telegramUserId, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken);
         try
         {
-            logger.LogInformation("Starting Moodle assignment retrieval using the saved encrypted session.");
+            logger.LogInformation("Loading enrolled Moodle courses for assignment selection using the saved encrypted session.");
             var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
             if (stored is null) return new(MoodleAssignmentsResultKind.Expired, []);
-            return await WithStoredSessionAsync(stored, async page => await ReadAssignmentsOnPageAsync(page, cancellationToken), cancellationToken);
+            return await WithStoredSessionAsync(stored, async page => await ReadAssignmentCoursesOnPageAsync(page, cancellationToken), cancellationToken);
+        }
+        catch (System.Security.Cryptography.CryptographicException exception)
+        {
+            logger.LogError("Saved Moodle session failed authenticated decryption ({ExceptionType}).", exception.GetType().Name);
+            return new(MoodleAssignmentsResultKind.SessionRestoreFailed, []);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError("Moodle assignment course-list retrieval failed ({ExceptionType}). Safe message: {SafeMessage}. Stack trace: {StackTrace}",
+                exception.GetType().FullName, SafeExceptionMessage(exception), exception.StackTrace);
+            return new(MoodleAssignmentsResultKind.Unavailable, []);
+        }
+        finally { gate.Release(); }
+    }
+
+    public Task<MoodleAssignmentsResult> GetAssignmentsAsync(long telegramUserId, CancellationToken cancellationToken) =>
+        GetAssignmentsCoreAsync(telegramUserId, null, cancellationToken);
+
+    public Task<MoodleAssignmentsResult> GetAssignmentsForCourseAsync(long telegramUserId, int courseId, CancellationToken cancellationToken) =>
+        GetAssignmentsCoreAsync(telegramUserId, courseId, cancellationToken);
+
+    private async Task<MoodleAssignmentsResult> GetAssignmentsCoreAsync(long telegramUserId, int? selectedCourseId, CancellationToken cancellationToken)
+    {
+        var gate = _userLocks.GetOrAdd(telegramUserId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            logger.LogInformation("Starting Moodle assignment retrieval using the saved encrypted session; selected course filter {SelectedCourseId}.", selectedCourseId);
+            var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
+            if (stored is null) return new(MoodleAssignmentsResultKind.Expired, []);
+            return await WithStoredSessionAsync(stored, async page => await ReadAssignmentsOnPageAsync(page, cancellationToken, selectedCourseId), cancellationToken);
         }
         catch (System.Security.Cryptography.CryptographicException exception)
         {
@@ -211,7 +242,52 @@ public sealed class MoodleBrowserService(
         finally { gate.Release(); }
     }
 
-    private async Task<MoodleAssignmentsResult> ReadAssignmentsOnPageAsync(IPage page, CancellationToken cancellationToken)
+    private async Task<MoodleAssignmentCourseListResult> ReadAssignmentCoursesOnPageAsync(IPage page, CancellationToken cancellationToken)
+    {
+        var target = MoodleCoursePageUrl.FromBaseUrl(options.Value.BaseUrl);
+        var response = await page.GotoAsync(target.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 25_000 });
+        logger.LogInformation("Moodle assignment course picker loaded; final URL {FinalUrl}; HTTP status {StatusCode}.", SafeUrl(page.Url), response?.Status.ToString() ?? "unavailable");
+        if (!IsUniversityHost(page.Url) || response?.Status is >= 400) return new(MoodleAssignmentsResultKind.Unavailable, []);
+        if (page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)) return new(MoodleAssignmentsResultKind.Expired, []);
+
+        var foundLinks = new List<CourseLink>();
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var current = new Uri(page.Url);
+        var incomplete = false;
+        for (var pageNumber = 0; pageNumber < 50; pageNumber++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!visited.Add(current.AbsoluteUri)) { incomplete = true; break; }
+            var anchors = page.Locator("a[href*='course/view.php']").Visible;
+            if (pageNumber == 0)
+            {
+                try { await anchors.First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 12_000 }); }
+                catch (PlaywrightException) { /* Inspect a possible explicit empty-course state below. */ }
+            }
+            var pageLinks = await anchors.EvaluateAllAsync<CourseLink[]>("els => els.map(a => ({ href: a.href, name: (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim() })).filter(x => x.href)");
+            foundLinks.AddRange(pageLinks);
+            var nextLink = page.Locator(".pagination a[rel='next'], nav[aria-label*='pagination' i] a[aria-label*='next' i], nav[aria-label*='التصفح'] a[aria-label*='التالي'], a[aria-label='Next page'], a[aria-label='الصفحة التالية']");
+            if (await nextLink.CountAsync() == 0) break;
+            if (pageNumber == 49) { incomplete = true; break; }
+            var href = await nextLink.First.GetAttributeAsync("href");
+            if (!Uri.TryCreate(current, href, out var nextUri) || !IsUniversityHost(nextUri.ToString())) { incomplete = true; break; }
+            current = nextUri;
+            var pageResponse = await page.GotoAsync(current.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
+            if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)) return new(MoodleAssignmentsResultKind.Expired, []);
+            if (pageResponse?.Status is >= 400) { incomplete = true; break; }
+        }
+
+        var links = MoodleCourseDomExtractor.NormalizeLinks(foundLinks.Select(link => new MoodleCourseLink(link.Name, link.Href)), options.Value.BaseUrl);
+        var courses = MoodleCourseDomExtractor.ToAssignmentOptions(links);
+        logger.LogInformation("Moodle assignment picker found {CourseCount} enrolled courses; course list incomplete {Incomplete}.", courses.Count, incomplete);
+        if (courses.Count == 0)
+            return await HasExplicitEmptyCourseMessageAsync(page)
+                ? new(MoodleAssignmentsResultKind.Success, [])
+                : new(MoodleAssignmentsResultKind.ExtractionFailed, []);
+        return new(incomplete ? MoodleAssignmentsResultKind.Partial : MoodleAssignmentsResultKind.Success, courses);
+    }
+
+    private async Task<MoodleAssignmentsResult> ReadAssignmentsOnPageAsync(IPage page, CancellationToken cancellationToken, int? selectedCourseId = null)
     {
         var target = MoodleCoursePageUrl.FromBaseUrl(options.Value.BaseUrl);
         var response = await page.GotoAsync(target.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 25_000 });
@@ -271,10 +347,18 @@ public sealed class MoodleBrowserService(
                 break;
             }
         }
-        var distinctCourses = MoodleCourseDomExtractor.NormalizeLinks(
+        var allDiscoveredCourses = MoodleCourseDomExtractor.NormalizeLinks(
             courses.Select(c => new MoodleCourseLink(c.Name, c.Href)), options.Value.BaseUrl);
         logger.LogInformation("Moodle assignments stage {Stage}: unique enrolled courses {CourseCount} from {CourseLinkCount} links.",
-            "course-link-normalization", distinctCourses.Count, courses.Count);
+            "course-link-normalization", allDiscoveredCourses.Count, courses.Count);
+        var distinctCourses = selectedCourseId.HasValue
+            ? allDiscoveredCourses.Where(course => int.TryParse(System.Web.HttpUtility.ParseQueryString(new Uri(course.Href).Query)["id"], out var id) && id == selectedCourseId.Value).ToList()
+            : allDiscoveredCourses.ToList();
+        if (selectedCourseId.HasValue && distinctCourses.Count == 0)
+        {
+            logger.LogWarning("Selected Moodle course {CourseId} is not in the current user's enrolled course list.", selectedCourseId.Value);
+            return new(MoodleAssignmentsResultKind.ExtractionFailed, []);
+        }
         if (distinctCourses.Count == 0)
         {
             logger.LogWarning("Moodle assignments stage {Stage}: no course URLs passed validation; final URL {FinalUrl}; page title {PageTitle}.",
@@ -426,7 +510,8 @@ public sealed class MoodleBrowserService(
         if (sessionExpiredDuringScan) coursesFailed += distinctCourses.Count - courseOrdinal;
 
         var assignments = MoodleAssignmentExtractor.Deduplicate(collected);
-        var summary = new MoodleAssignmentRetrievalSummary(distinctCourses.Count, !coursePaginationTruncated && !coursePaginationFailed,
+        var summary = new MoodleAssignmentRetrievalSummary(selectedCourseId.HasValue ? 1 : distinctCourses.Count,
+            selectedCourseId.HasValue || !coursePaginationTruncated && !coursePaginationFailed,
             coursesInspected, coursesWithoutAssignments, coursesFailed, assignmentsDiscovered, assignmentDetailsInspected, assignmentDetailsFailed);
         var result = MoodleAssignmentExtractor.CreateResult(assignments, failures, recognizedCoursePages > 0) with { Summary = summary };
         logger.LogInformation("Moodle assignment retrieval completed: result {ResultKind}; courses total {TotalCourses}, inspected {CoursesInspected}, empty {CoursesWithoutAssignments}, failed {CoursesFailed}; assignments discovered {AssignmentsDiscovered}, detail pages inspected {DetailsInspected}, failed {DetailsFailed}; extracted {ExtractedAssignmentCount}; other failures {FailureCount}.",

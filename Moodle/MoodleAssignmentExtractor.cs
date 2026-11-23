@@ -22,6 +22,8 @@ public sealed record MoodleAssignment(
     MoodleGradingStatus GradingStatus = MoodleGradingStatus.Unavailable,
     MoodleSubmissionAcceptance SubmissionAcceptance = MoodleSubmissionAcceptance.Unknown);
 public sealed record MoodleAssignmentLink(string Href, string Title);
+public sealed record MoodleAssignmentCourse(int Id, string Name);
+public sealed record MoodleAssignmentCourseListResult(MoodleAssignmentsResultKind Kind, IReadOnlyList<MoodleAssignmentCourse> Courses);
 public sealed record MoodleAssignmentRetrievalSummary(
     int TotalCourses,
     bool CourseListComplete,

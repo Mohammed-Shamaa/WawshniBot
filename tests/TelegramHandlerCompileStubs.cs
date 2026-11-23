@@ -14,6 +14,10 @@ public sealed class MoodleBrowserService
         Task.FromResult(new MoodleLinkResult(MoodleLinkResultKind.Unavailable, [], false));
     public Task<MoodleAssignmentsResult> GetAssignmentsAsync(long userId, CancellationToken cancellationToken) =>
         Task.FromResult(new MoodleAssignmentsResult(MoodleAssignmentsResultKind.Unavailable, []));
+    public Task<MoodleAssignmentCourseListResult> GetAssignmentCoursesAsync(long userId, CancellationToken cancellationToken) =>
+        Task.FromResult(new MoodleAssignmentCourseListResult(MoodleAssignmentsResultKind.Unavailable, []));
+    public Task<MoodleAssignmentsResult> GetAssignmentsForCourseAsync(long userId, int courseId, CancellationToken cancellationToken) =>
+        Task.FromResult(new MoodleAssignmentsResult(MoodleAssignmentsResultKind.Unavailable, []));
 }
 
 public sealed class MoodleSessionRepository

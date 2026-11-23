@@ -71,6 +71,43 @@ public sealed class MoodleAssignmentExtractorTests
         Assert.Equal(DateTimeOffset.Parse("2026-11-24T11:15:00Z"), result.SubmittedAt);
     }
 
+    [Fact]
+    public void Parses_the_due_and_submission_rows_shown_on_the_supplied_moodle_assignment_screenshots()
+    {
+        var notSubmitted = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot
+        {
+            Title = "Assignment #1",
+            Rows =
+            [
+                new() { Label = "Due", Value = "Tuesday, 1 December 2026, 11:59 PM", Iso = "2026-12-01T21:59:00Z" },
+                new() { Label = "Submission status", Value = "No submissions have been made yet" },
+                new() { Label = "Grading status", Value = "Not graded" },
+                new() { Label = "Time remaining", Value = "8 days 12 hours remaining" },
+                new() { Label = "Last modified", Value = "-" }
+            ]
+        }, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=411990", "برمجة الألعاب للأجهزة الذكية");
+        var submitted = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot
+        {
+            Title = "Assignment 1 - Search about Alexa Smart Home",
+            Rows =
+            [
+                new() { Label = "Due", Value = "Friday, 23 October 2026, 11:59 PM", Iso = "2026-10-23T21:59:00Z" },
+                new() { Label = "Submission status", Value = "Submitted for grading" },
+                new() { Label = "Grading status", Value = "Not graded" },
+                new() { Label = "Time remaining", Value = "Assignment was submitted 5 days 8 hours early" },
+                new() { Label = "Last modified", Value = "Sunday, 18 October 2026, 3:10 PM", Iso = "2026-10-18T13:10:00Z" }
+            ]
+        }, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=311562", "الحوسبة المنتشرة | م. محمد أحمد الأغا");
+
+        Assert.NotNull(notSubmitted);
+        Assert.Equal(DateTimeOffset.Parse("2026-12-01T21:59:00Z"), notSubmitted.DueAt);
+        Assert.Equal(MoodleAssignmentStatus.NotSubmitted, notSubmitted.Status);
+        Assert.NotNull(submitted);
+        Assert.Equal(MoodleAssignmentStatus.Submitted, submitted.Status);
+        Assert.Equal(DateTimeOffset.Parse("2026-10-18T13:10:00Z"), submitted.SubmittedAt);
+        Assert.Equal(DateTimeOffset.Parse("2026-10-23T21:59:00Z"), submitted.DueAt);
+    }
+
     [Theory]
     [InlineData("25 November 2026, 11:59 PM", "Asia/Gaza", 2)]
     [InlineData("٢٥ نوفمبر ٢٠٢٦، ١١:٥٩ م", "Asia/Gaza", 2)]

@@ -44,6 +44,9 @@ public sealed class TelegramBotService : IUpdateHandler
                             InlineKeyboardButton.WithCallbackData("رفض الطلب ❌", $"reg:reject:{callbackData}")
                         }
                     }), cancellationToken: ct),
+                async (chatId, text, choices, ct) => await botClient.SendMessage(chatId, text,
+                    replyMarkup: new InlineKeyboardMarkup(choices.Select(choice =>
+                        new[] { InlineKeyboardButton.WithCallbackData(choice.Text, choice.CallbackData) })), cancellationToken: ct),
                 cancellationToken);
             return;
         }
