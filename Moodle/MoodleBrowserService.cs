@@ -225,8 +225,15 @@ public sealed class MoodleBrowserService(
         var coursePages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var coursePageUrl = new Uri(page.Url);
         var coursePaginationTruncated = false;
-        for (var pageNumber = 0; pageNumber < 50 && coursePages.Add(coursePageUrl.AbsoluteUri); pageNumber++)
+        var coursePaginationFailed = false;
+        for (var pageNumber = 0; pageNumber < 50; pageNumber++)
         {
+            if (!coursePages.Add(coursePageUrl.AbsoluteUri))
+            {
+                coursePaginationFailed = true;
+                logger.LogWarning("Moodle course list pagination repeated a page URL; retaining courses already discovered.");
+                break;
+            }
             var courseAnchors = page.Locator("a[href*='course/view.php']").Visible;
             if (pageNumber == 0)
             {
@@ -241,11 +248,28 @@ public sealed class MoodleBrowserService(
             if (await nextLink.CountAsync() == 0) break;
             if (pageNumber == 49) { coursePaginationTruncated = true; break; }
             var nextHref = await nextLink.First.GetAttributeAsync("href");
-            if (!Uri.TryCreate(coursePageUrl, nextHref, out var nextUri) || !IsUniversityHost(nextUri.ToString())) break;
+            if (!Uri.TryCreate(coursePageUrl, nextHref, out var nextUri) || !IsUniversityHost(nextUri.ToString()))
+            {
+                coursePaginationFailed = true;
+                logger.LogWarning("Moodle course list pagination link was invalid; retaining courses already discovered.");
+                break;
+            }
             coursePageUrl = nextUri;
-            var coursePageResponse = await page.GotoAsync(coursePageUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
+            IResponse? coursePageResponse;
+            try { coursePageResponse = await page.GotoAsync(coursePageUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 }); }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                coursePaginationFailed = true;
+                logger.LogWarning("Moodle course list pagination failed ({ExceptionType}); retaining courses already discovered.", exception.GetType().Name);
+                break;
+            }
             if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)) return new(MoodleAssignmentsResultKind.Expired, []);
-            if (coursePageResponse?.Status is >= 400) return new(MoodleAssignmentsResultKind.Partial, []);
+            if (coursePageResponse?.Status is >= 400)
+            {
+                coursePaginationFailed = true;
+                logger.LogWarning("Moodle course list pagination returned HTTP {StatusCode}; retaining courses already discovered.", coursePageResponse.Status);
+                break;
+            }
         }
         var distinctCourses = MoodleCourseDomExtractor.NormalizeLinks(
             courses.Select(c => new MoodleCourseLink(c.Name, c.Href)), options.Value.BaseUrl);
@@ -261,20 +285,28 @@ public sealed class MoodleBrowserService(
         }
 
         var collected = new List<MoodleAssignment>();
-        var failures = coursePaginationTruncated ? 1 : 0;
+        var failures = coursePaginationTruncated || coursePaginationFailed ? 1 : 0;
         var recognizedCoursePages = 0;
+        var coursesInspected = 0;
+        var coursesWithoutAssignments = 0;
+        var coursesFailed = 0;
+        var assignmentsDiscovered = 0;
+        var assignmentDetailsInspected = 0;
+        var assignmentDetailsFailed = 0;
+        var sessionExpiredDuringScan = false;
         if (coursePaginationTruncated) logger.LogWarning("Moodle course pagination reached its safety limit; assignment results may be partial.");
         var courseOrdinal = 0;
         foreach (var course in distinctCourses)
         {
             courseOrdinal++;
             var stage = "course-id";
+            var courseFailed = false;
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 var courseUri = new Uri(course.Href);
                 var courseId = System.Web.HttpUtility.ParseQueryString(courseUri.Query).Get("id");
-                if (!int.TryParse(courseId, out var id)) { failures++; logger.LogWarning("Moodle assignment stage {Stage}: could not read course id for course #{CourseOrdinal}.", "course-id", courseOrdinal); continue; }
+                if (!int.TryParse(courseId, out var id)) { failures++; coursesFailed++; logger.LogWarning("Moodle assignment stage {Stage}: could not read course id for course #{CourseOrdinal}.", "course-id", courseOrdinal); continue; }
                 var indexUrl = new Uri(options.Value.BaseUrl, $"mod/assign/index.php?id={id}");
                 var courseActivityUrl = new Uri(options.Value.BaseUrl, $"course/view.php?id={id}");
                 stage = "course-page-navigation";
@@ -283,7 +315,21 @@ public sealed class MoodleBrowserService(
                 var coursePageResponse = await page.GotoAsync(courseActivityUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
                 logger.LogInformation("Moodle course page result for course #{CourseOrdinal}: final URL {FinalUrl}; page title {PageTitle}; HTTP status {StatusCode}.",
                     courseOrdinal, SafeUrl(page.Url), await page.TitleAsync(), coursePageResponse?.Status.ToString() ?? "unavailable");
-                if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)) return new(MoodleAssignmentsResultKind.Expired, []);
+                if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase))
+                {
+                    failures++;
+                    coursesFailed++;
+                    sessionExpiredDuringScan = true;
+                    logger.LogWarning("Moodle session expired or left the university host while opening course #{CourseOrdinal}; preserving assignments already collected.", courseOrdinal);
+                    break;
+                }
+                if (coursePageResponse?.Status is >= 400)
+                {
+                    failures++;
+                    coursesFailed++;
+                    logger.LogWarning("Moodle course page returned HTTP {StatusCode} for course #{CourseOrdinal}; it was not treated as an empty course.", coursePageResponse.Status, courseOrdinal);
+                    continue;
+                }
                 stage = "course-page-dom";
                 var coursePageLinks = await ReadVisibleAssignmentLinksAsync(page);
                 var indexData = new AssignmentIndexPageResult([], false, false);
@@ -293,12 +339,20 @@ public sealed class MoodleBrowserService(
                     logger.LogInformation("Moodle assignment stage {Stage}: checking the course assignment index for course #{CourseOrdinal}; URL {Url}.",
                         "assignment-index-navigation", courseOrdinal, SafeUrl(indexUrl.ToString()));
                     var indexResult = await ReadAssignmentLinksAsync(page, indexUrl, cancellationToken);
-                    if (indexResult is null) return new(MoodleAssignmentsResultKind.Expired, []);
+                    if (indexResult is null)
+                    {
+                        failures++;
+                        coursesFailed++;
+                        sessionExpiredDuringScan = true;
+                        logger.LogWarning("Moodle session expired while opening the assignment index for course #{CourseOrdinal}; preserving assignments already collected.", courseOrdinal);
+                        break;
+                    }
                     indexData = indexResult;
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     failures++;
+                    courseFailed = true;
                     logger.LogWarning("Moodle assignment index failed for course #{CourseOrdinal} ({ExceptionType}); safe message: {SafeMessage}.",
                         courseOrdinal, exception.GetType().Name, SafeExceptionMessage(exception));
                 }
@@ -308,37 +362,76 @@ public sealed class MoodleBrowserService(
                     .Select(link => new AssignmentLink { Href = link.Href, Title = link.Title }).ToArray();
                 indexData = new AssignmentIndexPageResult(normalizedCourseLinks, indexData.Truncated,
                     indexData.Recognized || coursePageLinks.Length > 0);
-                if (indexData.Truncated) failures++;
+                if (indexData.Truncated) { failures++; courseFailed = true; }
                 if (!indexData.Recognized)
                 {
                     failures++;
+                    courseFailed = true;
                     logger.LogWarning("Moodle assignment stage {Stage}: neither assignment links nor a recognized empty state appeared for course #{CourseOrdinal}; final URL {FinalUrl}; page title {PageTitle}.",
                         "assignment-index-dom", courseOrdinal, SafeUrl(page.Url), await page.TitleAsync());
+                    coursesFailed++;
                     continue;
                 }
                 recognizedCoursePages++;
+                coursesInspected++;
+                assignmentsDiscovered += indexData.Links.Length;
+                if (indexData.Links.Length == 0 && !courseFailed) coursesWithoutAssignments++;
                 logger.LogInformation("Moodle assignment stage {Stage}: detected {AssignmentLinkCount} assignment activities in course #{CourseOrdinal}.",
                     "assignment-link-discovery", indexData.Links.Length, courseOrdinal);
                 foreach (var link in indexData.Links)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     stage = "assignment-details";
-                    var assignment = await ReadAssignmentDetailAsync(page, link, course.Name, cancellationToken);
-                    if (assignment is not null) collected.Add(assignment); else failures++;
+                    try
+                    {
+                        var assignment = await ReadAssignmentDetailAsync(page, link, course.Name, cancellationToken);
+                        if (assignment is not null)
+                        {
+                            collected.Add(assignment);
+                            assignmentDetailsInspected++;
+                        }
+                        else
+                        {
+                            failures++;
+                            assignmentDetailsFailed++;
+                            if (page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase))
+                            {
+                                courseFailed = true;
+                                sessionExpiredDuringScan = true;
+                                logger.LogWarning("Moodle session expired while inspecting assignment details for course #{CourseOrdinal}; stopping further navigation and preserving collected assignments.", courseOrdinal);
+                                break;
+                            }
+                        }
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        failures++;
+                        assignmentDetailsFailed++;
+                        logger.LogWarning("Moodle assignment details failed for course #{CourseOrdinal} ({ExceptionType}); safe message: {SafeMessage}.",
+                            courseOrdinal, exception.GetType().Name, SafeExceptionMessage(exception));
+                    }
                 }
+                if (courseFailed) coursesFailed++;
+                if (sessionExpiredDuringScan) break;
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 failures++;
+                coursesFailed++;
                 logger.LogWarning("Moodle assignment retrieval failed at stage {Stage} for course #{CourseOrdinal} ({ExceptionType}); safe message: {SafeMessage}. Stack trace: {StackTrace}",
                     stage, courseOrdinal, exception.GetType().Name, SafeExceptionMessage(exception), exception.StackTrace);
             }
         }
 
+        if (sessionExpiredDuringScan) coursesFailed += distinctCourses.Count - courseOrdinal;
+
         var assignments = MoodleAssignmentExtractor.Deduplicate(collected);
-        var result = MoodleAssignmentExtractor.CreateResult(assignments, failures, recognizedCoursePages > 0);
-        logger.LogInformation("Moodle assignment extraction completed; result {ResultKind}; detected {AssignmentCount}; recognized course pages {RecognizedCoursePageCount}; failures {FailureCount}.",
-            result.Kind, result.Assignments.Count, recognizedCoursePages, failures);
+        var summary = new MoodleAssignmentRetrievalSummary(distinctCourses.Count, !coursePaginationTruncated && !coursePaginationFailed,
+            coursesInspected, coursesWithoutAssignments, coursesFailed, assignmentsDiscovered, assignmentDetailsInspected, assignmentDetailsFailed);
+        var result = MoodleAssignmentExtractor.CreateResult(assignments, failures, recognizedCoursePages > 0) with { Summary = summary };
+        logger.LogInformation("Moodle assignment retrieval completed: result {ResultKind}; courses total {TotalCourses}, inspected {CoursesInspected}, empty {CoursesWithoutAssignments}, failed {CoursesFailed}; assignments discovered {AssignmentsDiscovered}, detail pages inspected {DetailsInspected}, failed {DetailsFailed}; extracted {ExtractedAssignmentCount}; other failures {FailureCount}.",
+            result.Kind, summary.TotalCourses, summary.CoursesInspected, summary.CoursesWithoutAssignments, summary.CoursesFailed,
+            summary.AssignmentsDiscovered, summary.AssignmentDetailsInspected, summary.AssignmentDetailsFailed, result.Assignments.Count, failures);
         return result;
     }
 
@@ -413,41 +506,38 @@ public sealed class MoodleBrowserService(
         var response = await page.GotoAsync(uri.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
         logger.LogInformation("Moodle assignment details page loaded; HTTP status {StatusCode}.", response?.Status.ToString() ?? "unavailable");
         if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase) || response?.Status is >= 400) return null;
-        try { await page.Locator("#page-mod-assign-view, [data-region='assignment-info'], .activity-header").First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 5_000 }); }
-        catch (PlaywrightException) { await page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 3_000 }).ContinueOnTimeout(); }
+        try { await page.Locator("#page-mod-assign-view, [data-region='assignment-info'], .activity-header, .submissionstatustable, .activity-dates").First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 5_000 }); }
+        catch (PlaywrightException) { /* Still inspect the page snapshot; course details may use another theme layout. */ }
+        await page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 4_000 }).ContinueOnTimeout();
 
         var dataJson = await page.EvaluateAsync<string>("""
         () => {
           const text = e => (e?.innerText || e?.textContent || '').replace(/\s+/g, ' ').trim();
           const title = text(document.querySelector('h1')) || text(document.querySelector('[data-region="activity-header"] h1'));
           const body = text(document.body);
-          const timeValues = [...document.querySelectorAll('time[datetime]')].map(e => ({ label: text(e.parentElement), value: e.getAttribute('datetime') }));
-          const rows = [...document.querySelectorAll('tr, .submissionstatustable tr, [data-region="assign-info"] tr')].map(r => ({ label: text(r.querySelector('th, td:first-child, .col-1')), value: text(r.querySelector('td:last-child, .col-2')), iso: r.querySelector('time[datetime]')?.getAttribute('datetime') || null }));
+          const timeValues = [...document.querySelectorAll('time[datetime]')].map(e => ({ label: text(e.parentElement?.parentElement || e.parentElement), value: e.getAttribute('datetime') }));
+          const rowElements = [...new Set(document.querySelectorAll('.submissionstatustable tr, .generaltable tr, [data-region="assign-info"] tr, #page-mod-assign-view tr'))];
+          const rows = rowElements.map(r => {
+            const cells = [...r.querySelectorAll(':scope > th, :scope > td')];
+            const labelCell = cells.find(c => c.tagName === 'TH') || cells[0];
+            const valueCells = cells.filter(c => c !== labelCell);
+            const label = text(labelCell) || text(r.querySelector('.col-1, dt'));
+            const value = valueCells.map(text).filter(Boolean).join(' ') || text(r.querySelector('.col-2, dd'));
+            return { label, value, iso: r.querySelector('time[datetime]')?.getAttribute('datetime') || null };
+          }).filter(r => r.label);
+          for (const term of document.querySelectorAll('dl')) {
+            const terms = [...term.querySelectorAll(':scope > dt')];
+            for (const dt of terms) {
+              const dd = dt.nextElementSibling;
+              if (dd?.tagName === 'DD') rows.push({ label: text(dt), value: text(dd), iso: dd.querySelector('time[datetime]')?.getAttribute('datetime') || null });
+            }
+          }
           const description = text(document.querySelector('.activity-description, [data-region="activity-description"], #intro'));
           return JSON.stringify({ title, body, description, timeValues, rows });
         }
         """);
         var data = MoodleAssignmentExtractor.ParsePageSnapshot(dataJson);
-        var title = MoodleAssignmentExtractor.NormalizeTitle(data.Title);
-        if (string.IsNullOrWhiteSpace(title)) return null;
-
-        string? Find(string[] labels) => data.Rows.FirstOrDefault(r => labels.Any(l => r.Label.Contains(l, StringComparison.OrdinalIgnoreCase)))?.Value;
-        string? FindIso(string[] labels) => data.Rows.FirstOrDefault(r => labels.Any(l => r.Label.Contains(l, StringComparison.OrdinalIgnoreCase)))?.Iso;
-        var dueText = Find(["Due date", "Due", "موعد التسليم", "تاريخ الاستحقاق"]);
-        var dueIso = FindIso(["Due date", "Due", "موعد التسليم", "تاريخ الاستحقاق"]);
-        if (dueText is null) dueText = data.TimeValues.FirstOrDefault(t => t.Label.Contains("due", StringComparison.OrdinalIgnoreCase) || t.Label.Contains("موعد", StringComparison.OrdinalIgnoreCase))?.Label;
-        var (dueAt, dueKnowledge) = MoodleAssignmentExtractor.ParseDueDate(dueText, dueIso);
-        var submittedText = Find(["Last modified", "Last modified (submission)", "آخر تعديل", "آخر تسليم", "Submission date"]);
-        var submittedAt = MoodleAssignmentExtractor.ParseDate(submittedText, FindIso(["Last modified", "آخر تعديل", "آخر تسليم", "Submission date"]));
-        var statusRow = data.Rows.FirstOrDefault(r => new[] { "Submission status", "Grading status", "حالة التسليم", "حالة التقييم" }.Any(label => r.Label.Contains(label, StringComparison.OrdinalIgnoreCase)));
-        var statusText = statusRow?.Value;
-        var status = MoodleAssignmentExtractor.MapStatus(statusText);
-        if (status == MoodleAssignmentStatus.Submitted && statusText?.Contains("late", StringComparison.OrdinalIgnoreCase) == true) status = MoodleAssignmentStatus.SubmittedLate;
-        if (status == MoodleAssignmentStatus.Submitted && dueAt.HasValue && submittedAt.HasValue && submittedAt > dueAt) status = MoodleAssignmentStatus.SubmittedLate;
-        var available = MoodleAssignmentExtractor.ParseDate(Find(["Allow submissions from", "Available from", "متاح ابتداء", "السماح بالتسليم من"]), FindIso(["Allow submissions from", "Available from", "متاح ابتداء"]));
-        var cutoff = MoodleAssignmentExtractor.ParseDate(Find(["Cut-off date", "Cutoff date", "آخر موعد", "تاريخ الإغلاق"]), FindIso(["Cut-off date", "Cutoff date", "تاريخ الإغلاق"]));
-        return new MoodleAssignment(title, courseName, SafeAssignmentUrl(page.Url), string.IsNullOrWhiteSpace(data.Description) ? null : data.Description,
-            dueAt, dueKnowledge, available, cutoff, status, submittedAt);
+        return MoodleAssignmentExtractor.ParseAssignmentPage(data, SafeAssignmentUrl(page.Url), courseName);
     }
 
     private sealed class CourseLink { public string Href { get; set; } = ""; public string Name { get; set; } = ""; }

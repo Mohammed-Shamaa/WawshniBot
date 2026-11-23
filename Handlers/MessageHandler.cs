@@ -197,41 +197,73 @@ public sealed class MessageHandler(
         if (result.Kind == MoodleAssignmentsResultKind.SessionRestoreFailed) return "تعذر استرجاع جلسة Moodle المحفوظة. أرسل /link لإعادة ربط الحساب.";
         if (result.Kind == MoodleAssignmentsResultKind.Unavailable) return "تعذر فتح Moodle حالياً لاسترجاع الواجبات. حاول لاحقاً أو تحقق من /status.";
         if (result.Kind == MoodleAssignmentsResultKind.ExtractionFailed) return "تم فتح Moodle، لكن تعذر التعرف على قائمة المساقات أو الواجبات. لم أعتبر ذلك دليلاً على عدم وجود واجبات.";
-        if (result.Assignments.Count == 0)
-            return result.Kind == MoodleAssignmentsResultKind.Partial
-                ? "تعذر التأكد من وجود واجبات بسبب مشكلة في قراءة بعض صفحات Moodle. أعد المحاولة لاحقاً."
-                : "لم تظهر واجبات مسجلة في صفحات Moodle للمساقات المسجل بها حسابك.";
-
         var now = DateTimeOffset.UtcNow;
         var ordered = MoodleAssignmentExtractor.Sort(result.Assignments, now);
         var lines = new List<string> { result.Kind == MoodleAssignmentsResultKind.Partial ? "📚 واجباتك الجامعية (نتائج جزئية):" : "📚 واجباتك الجامعية:" };
-        foreach (var group in ordered.GroupBy(a => a.Course))
+        if (result.Summary is { } summary)
         {
-            lines.Add($"\n📖 {group.Key}");
-            foreach (var assignment in group)
+            var coursesText = summary.CourseListComplete
+                ? $"المساقات المسجلة: {summary.TotalCourses}"
+                : $"المساقات التي عُثر عليها: {summary.TotalCourses} على الأقل (تعذر إكمال القائمة)";
+            lines.Add($"{coursesText}؛ فُحص {summary.CoursesInspected}، بلا واجبات {summary.CoursesWithoutAssignments}، وتعذر فحص {summary.CoursesFailed}.");
+            lines.Add($"الواجبات: اكتُشف {summary.AssignmentsDiscovered}، وفُحصت تفاصيل {summary.AssignmentDetailsInspected}، وتعذر فحص تفاصيل {summary.AssignmentDetailsFailed}.");
+        }
+        if (result.Assignments.Count == 0)
+        {
+            lines.Add(result.Kind == MoodleAssignmentsResultKind.Partial
+                ? "تعذر التأكد من وجود واجبات بسبب تعذر قراءة بعض صفحات Moodle. أعد المحاولة لاحقاً."
+                : "لم تظهر واجبات مسجلة في صفحات Moodle للمساقات المسجل بها حسابك.");
+            return string.Join("\n", lines);
+        }
+        var sections = ordered.GroupBy(a => a.DueDateKnowledge == MoodleDateKnowledge.Known && a.DueAt >= now
+                ? 0
+                : MoodleAssignmentExtractor.IsOverdue(a, now) ? 1 : 2)
+            .OrderBy(section => section.Key);
+        foreach (var section in sections)
+        {
+            lines.Add(section.Key switch { 0 => "\n⏰ واجبات قادمة", 1 => "\n⚠️ واجبات متأخرة", _ => "\n📌 مواعيد سابقة أو غير متاحة" });
+            foreach (var group in section.GroupBy(a => a.Course))
             {
-                var state = assignment.DueDateKnowledge switch
+                lines.Add($"\n📖 {group.Key}");
+                foreach (var assignment in group)
                 {
-                    MoodleDateKnowledge.NoDeadline => "لا يوجد موعد نهائي",
-                    MoodleDateKnowledge.Unknown => "موعد التسليم غير متاح",
-                    _ when MoodleAssignmentExtractor.IsOverdue(assignment, now) => $"متأخر — {assignment.DueAt:dd MMM yyyy HH:mm}",
-                    _ => $"{assignment.DueAt:dd MMM yyyy HH:mm} ({(assignment.DueAt < now ? "انتهى الموعد" : "قادم")})"
-                };
-                var status = assignment.Status switch
-                {
-                    MoodleAssignmentStatus.NotSubmitted => "لم يتم التسليم",
-                    MoodleAssignmentStatus.Draft => "مسودة غير مسلّمة",
-                    MoodleAssignmentStatus.Submitted => "تم التسليم",
-                    MoodleAssignmentStatus.SubmittedLate => "تم التسليم متأخراً",
-                    MoodleAssignmentStatus.NeedsRevision => "يحتاج إلى تعديل",
-                    MoodleAssignmentStatus.Graded => "تم التقييم",
-                    _ => "حالة التسليم غير متاحة"
-                };
-                lines.Add($"• {assignment.Title}\n  الموعد: {state}\n  الحالة: {status}");
-                if (assignment.AvailableFrom.HasValue) lines.Add($"  متاح من: {assignment.AvailableFrom:dd MMM yyyy HH:mm}");
-                if (assignment.CutoffAt.HasValue) lines.Add($"  آخر موعد للإغلاق: {assignment.CutoffAt:dd MMM yyyy HH:mm}");
-                if (assignment.SubmittedAt.HasValue) lines.Add($"  وقت التسليم: {assignment.SubmittedAt:dd MMM yyyy HH:mm}");
-                lines.Add($"  {assignment.Url}");
+                    var state = assignment.DueDateKnowledge switch
+                    {
+                        MoodleDateKnowledge.NoDeadline => "لا يوجد موعد نهائي",
+                        MoodleDateKnowledge.ExtractionFailed => "تعذر قراءة موعد التسليم من الصفحة",
+                        MoodleDateKnowledge.Unknown => "معلومات موعد التسليم غير متاحة في Moodle",
+                        _ when MoodleAssignmentExtractor.IsOverdue(assignment, now) => $"متأخر — {assignment.DueAt:dd MMM yyyy HH:mm}",
+                        _ => $"{assignment.DueAt:dd MMM yyyy HH:mm} ({(assignment.DueAt < now ? "انتهى الموعد" : "قادم")})"
+                    };
+                    var status = assignment.Status switch
+                    {
+                        MoodleAssignmentStatus.NotSubmitted => "لم يتم التسليم",
+                        MoodleAssignmentStatus.NotRequired => "لا يتطلب تسليماً إلكترونياً",
+                        MoodleAssignmentStatus.Draft => "مسودة غير مسلّمة",
+                        MoodleAssignmentStatus.Submitted => "تم التسليم",
+                        MoodleAssignmentStatus.SubmittedLate => "تم التسليم متأخراً",
+                        MoodleAssignmentStatus.NeedsRevision => "يحتاج إلى تعديل",
+                        MoodleAssignmentStatus.Graded => "تم التقييم",
+                        _ => "حالة التسليم غير متاحة"
+                    };
+                    var gradingStatus = assignment.GradingStatus switch
+                    {
+                        MoodleGradingStatus.NotGraded => "لم يتم التقييم بعد",
+                        MoodleGradingStatus.Graded => "تم التقييم",
+                        MoodleGradingStatus.NeedsChanges => "يحتاج إلى تعديلات",
+                        _ => "حالة التقييم غير متاحة"
+                    };
+                    var acceptance = assignment.SubmissionAcceptance switch
+                    {
+                        MoodleSubmissionAcceptance.Accepted => "التسليم ما زال متاحاً",
+                        MoodleSubmissionAcceptance.NotAccepted => "التسليم لم يعد متاحاً",
+                        _ => "إمكانية التسليم غير متاحة"
+                    };
+                    lines.Add($"• {assignment.Title}\n  موعد التسليم: {state}\n  حالة التسليم: {status}\n  حالة التقييم: {gradingStatus}\n  وقت التسليم: {(assignment.SubmittedAt.HasValue ? assignment.SubmittedAt.Value.ToString("dd MMM yyyy HH:mm") : "غير متاح")}\n  قبول التسليم: {acceptance}");
+                    if (assignment.AvailableFrom.HasValue) lines.Add($"  متاح من: {assignment.AvailableFrom:dd MMM yyyy HH:mm}");
+                    if (assignment.CutoffAt.HasValue) lines.Add($"  آخر موعد للإغلاق: {assignment.CutoffAt:dd MMM yyyy HH:mm}");
+                    lines.Add($"  {assignment.Url}");
+                }
             }
         }
         return string.Join("\n", lines);

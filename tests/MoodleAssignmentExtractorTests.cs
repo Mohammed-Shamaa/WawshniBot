@@ -45,8 +45,115 @@ public sealed class MoodleAssignmentExtractorTests
     [InlineData("غير معروف", MoodleAssignmentStatus.Unavailable)]
     public void Status_mapping_requires_actual_text(string text, MoodleAssignmentStatus expected) => Assert.Equal(expected, MoodleAssignmentExtractor.MapStatus(text));
 
+    [Theory]
+    [InlineData("Submitted for grading / submitted 2 days late", MoodleAssignmentStatus.SubmittedLate)]
+    [InlineData("Submitted for grading", MoodleAssignmentStatus.Submitted)]
+    [InlineData("No attempt", MoodleAssignmentStatus.NotSubmitted)]
+    [InlineData("No submission", MoodleAssignmentStatus.NotSubmitted)]
+    [InlineData("No online submissions required", MoodleAssignmentStatus.NotRequired)]
+    [InlineData("تم التسليم، متأخر عن الموعد", MoodleAssignmentStatus.SubmittedLate)]
+    public void Submission_status_reads_actual_moodle_status_and_lateness(string text, MoodleAssignmentStatus expected) =>
+        Assert.Equal(expected, MoodleAssignmentExtractor.MapStatus(text));
+
+    [Theory]
+    [InlineData("Not graded", MoodleGradingStatus.NotGraded)]
+    [InlineData("Graded", MoodleGradingStatus.Graded)]
+    [InlineData("Needs changes", MoodleGradingStatus.NeedsChanges)]
+    [InlineData("غير معروف", MoodleGradingStatus.Unavailable)]
+    public void Grading_status_is_extracted_separately(string text, MoodleGradingStatus expected) =>
+        Assert.Equal(expected, MoodleAssignmentExtractor.MapGradingStatus(text));
+
+    [Theory]
+    [InlineData("Submissions are accepted", MoodleSubmissionAcceptance.Accepted)]
+    [InlineData("Submissions are no longer accepted", MoodleSubmissionAcceptance.NotAccepted)]
+    [InlineData("Add submission", MoodleSubmissionAcceptance.Unknown)]
+    public void Submission_acceptance_requires_explicit_page_text(string text, MoodleSubmissionAcceptance expected) =>
+        Assert.Equal(expected, MoodleAssignmentExtractor.MapSubmissionAcceptance(text));
+
     [Fact]
-    public void Sorts_overdue_then_upcoming_and_unknown_deadlines_last()
+    public void Parses_english_assignment_page_deadlines_submission_time_and_grading_status()
+    {
+        var snapshot = new MoodleAssignmentPageSnapshot
+        {
+            Title = "Research assignment",
+            Rows =
+            [
+                new() { Label = "Due date", Value = "25 November 2026, 11:59 PM", Iso = "2026-11-25T21:59:00+02:00" },
+                new() { Label = "Allow submissions from", Value = "20 November 2026", Iso = "2026-11-20T00:00:00+02:00" },
+                new() { Label = "Cut-off date", Value = "27 November 2026", Iso = "2026-11-27T23:59:00+02:00" },
+                new() { Label = "Submission status", Value = "Submitted for grading" },
+                new() { Label = "Time remaining", Value = "Submissions are accepted" },
+                new() { Label = "Last modified (submission)", Value = "24 November 2026, 1:15 PM", Iso = "2026-11-24T13:15:00+02:00" },
+                new() { Label = "Grading status", Value = "Not graded" }
+            ]
+        };
+
+        var result = MoodleAssignmentExtractor.ParseAssignmentPage(snapshot, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=10", "Research Methods");
+
+        Assert.NotNull(result);
+        Assert.Equal("Research Methods", result.Course);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-25T21:59:00+02:00"), result.DueAt);
+        Assert.Equal(MoodleDateKnowledge.Known, result.DueDateKnowledge);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-20T00:00:00+02:00"), result.AvailableFrom);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-27T23:59:00+02:00"), result.CutoffAt);
+        Assert.Equal(MoodleAssignmentStatus.Submitted, result.Status);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-24T13:15:00+02:00"), result.SubmittedAt);
+        Assert.Equal(MoodleGradingStatus.NotGraded, result.GradingStatus);
+        Assert.Equal(MoodleSubmissionAcceptance.Accepted, result.SubmissionAcceptance);
+    }
+
+    [Fact]
+    public void Parses_arabic_assignment_page_and_does_not_infer_missing_status()
+    {
+        var snapshot = new MoodleAssignmentPageSnapshot
+        {
+            Title = "واجب تطبيقي",
+            Rows =
+            [
+                new() { Label = "تاريخ الاستحقاق", Value = "25 نوفمبر 2026", Iso = "2026-11-25T10:00:00+02:00" },
+                new() { Label = "حالة التسليم", Value = "تم التسليم" },
+                new() { Label = "وقت التسليم", Value = "24 نوفمبر 2026", Iso = "2026-11-24T09:00:00+02:00" },
+                new() { Label = "حالة التقييم", Value = "تم التصحيح" }
+            ]
+        };
+
+        var result = MoodleAssignmentExtractor.ParseAssignmentPage(snapshot, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=11", "مساق عربي");
+
+        Assert.NotNull(result);
+        Assert.Equal(MoodleAssignmentStatus.Submitted, result.Status);
+        Assert.Equal(MoodleGradingStatus.Graded, result.GradingStatus);
+        Assert.Equal(MoodleSubmissionAcceptance.Unknown, result.SubmissionAcceptance);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-25T10:00:00+02:00"), result.DueAt);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-24T09:00:00+02:00"), result.SubmittedAt);
+    }
+
+    [Fact]
+    public void Distinguishes_no_deadline_from_unavailable_and_failed_date_extraction()
+    {
+        var noDeadline = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot
+        {
+            Title = "No deadline assignment",
+            Rows = [new() { Label = "Due date", Value = "No due date" }]
+        }, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=12", "Course");
+        var brokenDate = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot
+        {
+            Title = "Unreadable date assignment",
+            Rows = [new() { Label = "Due date", Value = "some unknown date format" }]
+        }, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=13", "Course");
+        var absent = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot { Title = "Page without date fields" },
+            "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=14", "Course");
+
+        Assert.Equal(MoodleDateKnowledge.NoDeadline, noDeadline!.DueDateKnowledge);
+        Assert.Equal(MoodleDateKnowledge.ExtractionFailed, brokenDate!.DueDateKnowledge);
+        Assert.Equal(MoodleDateKnowledge.Unknown, absent!.DueDateKnowledge);
+        Assert.Equal(MoodleAssignmentStatus.Unavailable, absent.Status);
+        Assert.Equal(MoodleGradingStatus.Unavailable, absent.GradingStatus);
+        Assert.Equal(MoodleSubmissionAcceptance.Unknown, absent.SubmissionAcceptance);
+        Assert.Null(absent.SubmittedAt);
+    }
+
+    [Fact]
+    public void Sorts_upcoming_then_overdue_and_unknown_deadlines_last()
     {
         var now = DateTimeOffset.Parse("2026-11-19T12:00:00Z");
         var assignments = new[]
@@ -55,7 +162,7 @@ public sealed class MoodleAssignmentExtractorTests
             Assignment("later", "https://x.test/2", now.AddDays(2)),
             Assignment("overdue", "https://x.test/1", now.AddDays(-1))
         };
-        Assert.Equal(new[] { "overdue", "later", "unknown" }, MoodleAssignmentExtractor.Sort(assignments, now).Select(a => a.Title));
+        Assert.Equal(new[] { "later", "overdue", "unknown" }, MoodleAssignmentExtractor.Sort(assignments, now).Select(a => a.Title));
         Assert.True(MoodleAssignmentExtractor.IsOverdue(assignments[2], now));
         Assert.False(MoodleAssignmentExtractor.IsOverdue(assignments[0], now));
     }
@@ -88,6 +195,21 @@ public sealed class MoodleAssignmentExtractorTests
         Assert.Equal(MoodleAssignmentsResultKind.Partial, result.Kind);
         Assert.Single(result.Assignments);
         Assert.Equal(real.Title, result.Assignments[0].Title);
+    }
+
+    [Fact]
+    public void Retrieval_summary_reports_partial_courses_and_failed_assignment_detail_pages()
+    {
+        var summary = new MoodleAssignmentRetrievalSummary(7, true, 7, 3, 0, 7, 6, 1);
+        var assignment = Assignment("واجب تم استخراجه", "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=101");
+        var result = MoodleAssignmentExtractor.CreateResult([assignment], failureCount: 1, recognizedCoursePages: true) with { Summary = summary };
+
+        Assert.Equal(MoodleAssignmentsResultKind.Partial, result.Kind);
+        Assert.Equal(7, result.Summary!.TotalCourses);
+        Assert.True(result.Summary.CourseListComplete);
+        Assert.Equal(3, result.Summary.CoursesWithoutAssignments);
+        Assert.Equal(1, result.Summary.AssignmentDetailsFailed);
+        Assert.Single(result.Assignments);
     }
 
     [Fact]
