@@ -262,6 +262,11 @@ public sealed class MoodleBrowserService(
             if (pageNumber == 0)
             {
                 try { await anchors.First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 12_000 }); }
+                catch (TimeoutException)
+                {
+                    logger.LogWarning("Moodle assignment course picker showed no visible course link within 12 seconds; final URL {FinalUrl}; page title {PageTitle}. Inspecting the DOM before deciding the result.",
+                        SafeUrl(page.Url), await page.TitleAsync());
+                }
                 catch (PlaywrightException) { /* Inspect a possible explicit empty-course state below. */ }
             }
             var pageLinks = await anchors.EvaluateAllAsync<CourseLink[]>("els => els.map(a => ({ href: a.href, name: (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim() })).filter(x => x.href)");
@@ -314,6 +319,11 @@ public sealed class MoodleBrowserService(
             if (pageNumber == 0)
             {
                 try { await courseAnchors.First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 12_000 }); }
+                catch (TimeoutException)
+                {
+                    logger.LogWarning("Moodle course list showed no visible course link within 12 seconds; final URL {FinalUrl}; page title {PageTitle}. Inspecting the DOM before deciding the result.",
+                        SafeUrl(page.Url), await page.TitleAsync());
+                }
                 catch (PlaywrightException) { /* Log the observed counts below; absence alone does not mean no enrollment. */ }
             }
             var pageCourses = await courseAnchors.EvaluateAllAsync<CourseLink[]>("els => els.map(a => ({ href: a.href, name: (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim() })).filter(x => x.href)");
@@ -754,6 +764,11 @@ public sealed class MoodleBrowserService(
         try
         {
             await links.First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 12_000 });
+        }
+        catch (TimeoutException)
+        {
+            logger.LogWarning("Moodle courses page showed no visible course link within 12 seconds; final URL {FinalUrl}; page title {PageTitle}. Inspecting the DOM summary instead of treating it as an empty course list.",
+                SafeUrl(page.Url), await page.TitleAsync());
         }
         catch (PlaywrightException)
         {
