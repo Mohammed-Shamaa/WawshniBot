@@ -320,6 +320,14 @@ public sealed class MoodleBrowserService(
             courses.AddRange(pageCourses);
             if (pageNumber == 0)
                 logger.LogInformation("Moodle assignments stage {Stage}: visible course links {VisibleCourseLinkCount}; page {PageNumber}.", "course-link-discovery", pageCourses.Length, pageNumber + 1);
+            if (selectedCourseId.HasValue && pageCourses.Any(course =>
+                    Uri.TryCreate(course.Href, UriKind.Absolute, out var courseUri)
+                    && int.TryParse(System.Web.HttpUtility.ParseQueryString(courseUri.Query)["id"], out var discoveredId)
+                    && discoveredId == selectedCourseId.Value))
+            {
+                logger.LogInformation("Selected Moodle course was found on course-list page {PageNumber}; stopping pagination after validating enrollment.", pageNumber + 1);
+                break;
+            }
             var nextLink = page.Locator(".pagination a[rel='next'], nav[aria-label*='pagination' i] a[aria-label*='next' i], nav[aria-label*='التصفح'] a[aria-label*='التالي'], a[aria-label='Next page'], a[aria-label='الصفحة التالية']");
             if (await nextLink.CountAsync() == 0) break;
             if (pageNumber == 49) { coursePaginationTruncated = true; break; }
@@ -656,20 +664,33 @@ public sealed class MoodleBrowserService(
         }
         """);
         var data = MoodleAssignmentExtractor.ParsePageSnapshot(dataJson);
-        var submissionStatusLabelDetected = data.Rows.Any(row => row.Label.Contains("submission status", StringComparison.OrdinalIgnoreCase)
+        var statusRows = data.Rows.Where(row => row.Label.Contains("submission status", StringComparison.OrdinalIgnoreCase)
                 || row.Label.Contains("حالة التسليم", StringComparison.OrdinalIgnoreCase)
                 || row.Label.Contains("حالة الإرسال", StringComparison.OrdinalIgnoreCase)
-                || row.Label.Contains("حالة التقديم", StringComparison.OrdinalIgnoreCase))
+                || row.Label.Contains("حالة التقديم", StringComparison.OrdinalIgnoreCase)
+                || row.Label.Contains("حالة الواجب", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var deadlineRows = data.Rows.Where(row => row.Label.Contains("due", StringComparison.OrdinalIgnoreCase)
+                || row.Label.Contains("deadline", StringComparison.OrdinalIgnoreCase)
+                || row.Label.Contains("موعد", StringComparison.OrdinalIgnoreCase)
+                || row.Label.Contains("تاريخ التسليم", StringComparison.OrdinalIgnoreCase)
+                || row.Label.Contains("تاريخ الاستحقاق", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var submissionStatusLabelDetected = statusRows.Length > 0
             || data.BodyLines.Any(line => line.Contains("submission status", StringComparison.OrdinalIgnoreCase)
                 || line.Contains("حالة التسليم", StringComparison.OrdinalIgnoreCase)
                 || line.Contains("حالة الإرسال", StringComparison.OrdinalIgnoreCase)
-                || line.Contains("حالة التقديم", StringComparison.OrdinalIgnoreCase));
+                || line.Contains("حالة التقديم", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("حالة الواجب", StringComparison.OrdinalIgnoreCase));
         var assignment = MoodleAssignmentExtractor.ParseAssignmentPage(data, SafeAssignmentUrl(page.Url), courseName, options.Value.TimeZoneId);
-        logger.LogInformation("Moodle assignment DOM snapshot contains {RowCount} table rows and {BodyLineCount} text lines; status label detected {StatusLabelDetected}; parsed status {SubmissionStatus}; deadline state {DeadlineState}.",
-            data.Rows.Count, data.BodyLines.Count, submissionStatusLabelDetected,
+        var statusValues = statusRows.Select(row => row.Value).Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
+        var deadlineValues = deadlineRows.Select(row => row.Value).Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
+        logger.LogInformation("Moodle assignment DOM snapshot contains {RowCount} table rows and {BodyLineCount} text lines; status label {StatusLabelDetected} with {StatusValueCount} populated row values (Arabic text {StatusHasArabic}); deadline labels {DeadlineLabelCount} with {DeadlineValueCount} populated row values; parsed status {SubmissionStatus}; deadline state {DeadlineState}.",
+            data.Rows.Count, data.BodyLines.Count, submissionStatusLabelDetected, statusValues.Length,
+            statusValues.Any(ContainsArabic), deadlineRows.Length, deadlineValues.Length,
             assignment?.Status.ToString() ?? "unavailable", assignment?.DueDateKnowledge.ToString() ?? "unavailable");
         return assignment;
     }
+
+    private static bool ContainsArabic(string value) => value.Any(character => character is >= '\u0600' and <= '\u06FF');
 
     private sealed class CourseLink { public string Href { get; set; } = ""; public string Name { get; set; } = ""; }
     private sealed class AssignmentLink { public string Href { get; set; } = ""; public string Title { get; set; } = ""; }

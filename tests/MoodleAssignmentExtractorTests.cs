@@ -172,16 +172,38 @@ public sealed class MoodleAssignmentExtractorTests
         Assert.Equal(MoodleAssignmentStatus.Submitted, result.Status);
     }
 
+    [Fact]
+    public void Parses_arabic_moodle_field_labels_and_values()
+    {
+        var result = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot
+        {
+            Title = "واجب عملي",
+            Rows =
+            [
+                new() { Label = "موعد الاستحقاق", Value = "الثلاثاء، ١ ديسمبر ٢٠٢٦، ١١:٥٩ م", Iso = "2026-12-01T21:59:00Z" },
+                new() { Label = "حالة الواجب", Value = "تَمَّ التَّسليمُ للتقييم" },
+                new() { Label = "حالة التقييم", Value = "لم يتم التقييم بعد" }
+            ]
+        }, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=81237", "مساق عملي");
+
+        Assert.NotNull(result);
+        Assert.Equal(DateTimeOffset.Parse("2026-12-01T21:59:00Z"), result.DueAt);
+        Assert.Equal(MoodleAssignmentStatus.Submitted, result.Status);
+        Assert.Equal(MoodleGradingStatus.NotGraded, result.GradingStatus);
+    }
+
     [Theory]
-    [InlineData("25 November 2026, 11:59 PM", "Asia/Gaza", 2)]
-    [InlineData("٢٥ نوفمبر ٢٠٢٦، ١١:٥٩ م", "Asia/Gaza", 2)]
-    [InlineData("25 November 2026, 11:59 PM", "UTC", 0)]
-    public void Localized_wall_clock_dates_use_the_configured_moodle_timezone(string value, string timezone, int expectedOffsetHours)
+    [InlineData("25 November 2026, 11:59 PM", "Asia/Gaza", 2, 25)]
+    [InlineData("٢٥ نوفمبر ٢٠٢٦، ١١:٥٩ م", "Asia/Gaza", 2, 25)]
+    [InlineData("الثلاثاء، ١ ديسمبر ٢٠٢٦، ١١:٥٩ م", "Asia/Gaza", 2, 1)]
+    [InlineData("Tuesday, 1 December 2026, 11:59 PM", "Asia/Gaza", 2, 1)]
+    [InlineData("25 November 2026, 11:59 PM", "UTC", 0, 25)]
+    public void Localized_wall_clock_dates_use_the_configured_moodle_timezone(string value, string timezone, int expectedOffsetHours, int expectedDay)
     {
         var parsed = MoodleAssignmentExtractor.ParseDueDate(value, timeZoneId: timezone);
         Assert.Equal(MoodleDateKnowledge.Known, parsed.Knowledge);
         Assert.Equal(expectedOffsetHours, parsed.Value!.Value.Offset.TotalHours);
-        Assert.Equal(25, parsed.Value.Value.Day);
+        Assert.Equal(expectedDay, parsed.Value.Value.Day);
         Assert.Equal(23, parsed.Value.Value.Hour);
         Assert.Equal(59, parsed.Value.Value.Minute);
     }
@@ -190,6 +212,7 @@ public sealed class MoodleAssignmentExtractorTests
     public void Moodle_zero_timestamp_means_unconfigured_deadline_not_unix_epoch()
     {
         Assert.Equal(MoodleDateKnowledge.NoDeadline, MoodleAssignmentExtractor.ParseDueDate(null, "0").Knowledge);
+        Assert.Equal(MoodleDateKnowledge.NoDeadline, MoodleAssignmentExtractor.ParseDueDate("لم يتم تحديد موعد التسليم").Knowledge);
         Assert.Null(MoodleAssignmentExtractor.ParseDate(null, "0"));
     }
 
@@ -202,7 +225,9 @@ public sealed class MoodleAssignmentExtractorTests
     [InlineData("Not graded", MoodleAssignmentStatus.Unavailable)]
     [InlineData("لم يتم التقييم", MoodleAssignmentStatus.Unavailable)]
     [InlineData("لم يتم تسليم", MoodleAssignmentStatus.NotSubmitted)]
+    [InlineData("لم يتم تقديم أي تسليمات بعد", MoodleAssignmentStatus.NotSubmitted)]
     [InlineData("تم تسليم الواجب", MoodleAssignmentStatus.Submitted)]
+    [InlineData("تَمَّ التَّسْلِيمُ", MoodleAssignmentStatus.Submitted)]
     [InlineData("يحتاج إلى تعديل", MoodleAssignmentStatus.NeedsRevision)]
     [InlineData("غير معروف", MoodleAssignmentStatus.Unavailable)]
     public void Status_mapping_requires_actual_text(string text, MoodleAssignmentStatus expected) => Assert.Equal(expected, MoodleAssignmentExtractor.MapStatus(text));
