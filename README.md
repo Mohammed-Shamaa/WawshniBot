@@ -40,6 +40,7 @@ The GitHub repository root is the project root. Create a Docker Web Service from
 - `ConnectionStrings__DefaultConnection` = full Neon PostgreSQL connection URI
 - `Moodle__BaseUrl=https://moodle.iugaza.edu.ps/`
 - `Moodle__LoginTimeoutSeconds=45`
+- `Moodle__TimeZoneId=Asia/Gaza` (default; set this to the timezone configured for the Moodle account if it differs)
 - `Moodle__SessionEncryptionKey` = Base64 encoding of 32 random bytes, generated for example with `openssl rand -base64 32`; `Moodle__SessionEncryptionKeyVersion=1`. Store keys only in Render and back them up securely. For rotation, increment the version and retain old values as `Moodle__PreviousSessionEncryptionKeys__1` until old session rows are removed or re-encrypted.
 - `Moodle__ScanIntervalMinutes=10`
 - `KeepAlive__Url=https://wawshnibot.onrender.com/health`

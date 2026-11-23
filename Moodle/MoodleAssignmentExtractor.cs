@@ -62,6 +62,8 @@ public static class MoodleAssignmentExtractor
     {
         if (string.IsNullOrWhiteSpace(text)) return MoodleAssignmentStatus.Unavailable;
         var value = Normalize(text);
+        if (Has(value, "not graded", "not yet graded", "لم يتم التقييم", "لم يتم التصحيح", "غير مصحح", "بانتظار التقييم"))
+            return MoodleAssignmentStatus.Unavailable;
         if (Has(value, "graded", "تم التقييم", "تم تقييم", "مقيّم", "مقيم")) return MoodleAssignmentStatus.Graded;
         if (Has(value, "needs revision", "needs changes", "requires changes", "يحتاج إلى تعديل", "يحتاج تعديل", "بحاجة إلى تعديل")) return MoodleAssignmentStatus.NeedsRevision;
         if (Has(value, "no online submissions required", "does not require you to submit anything online", "offline", "لا يتطلب تسليماً", "لا يتطلب تسليم")) return MoodleAssignmentStatus.NotRequired;
@@ -83,16 +85,18 @@ public static class MoodleAssignmentExtractor
         return MoodleGradingStatus.Unavailable;
     }
 
-    public static MoodleAssignment? ParseAssignmentPage(MoodleAssignmentPageSnapshot snapshot, string url, string course)
+    public static MoodleAssignment? ParseAssignmentPage(MoodleAssignmentPageSnapshot snapshot, string url, string course, string timeZoneId = "Asia/Gaza")
     {
         var title = NormalizeTitle(snapshot.Title);
         if (title.Length == 0) return null;
 
-        var dueRow = FindRow(snapshot.Rows, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "آخر موعد للتسليم");
-        var dueTime = FindTime(snapshot.TimeValues, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "آخر موعد للتسليم");
+        // In Moodle, Due date and Cut-off date are distinct. In Arabic, "آخر موعد للتسليم"
+        // describes the cut-off and must never be substituted for the normal Due date.
+        var dueRow = FindRow(snapshot.Rows, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
+        var dueTime = FindTime(snapshot.TimeValues, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
         var dueText = dueRow?.Value ?? dueTime?.Label;
         var dueIso = dueRow?.Iso ?? dueTime?.Value;
-        var (dueAt, dueKnowledge) = ParseDueDate(dueText, dueIso);
+        var (dueAt, dueKnowledge) = ParseDueDate(dueText, dueIso, timeZoneId);
         if (dueKnowledge == MoodleDateKnowledge.Unknown && (dueRow is not null || dueTime is not null))
             dueKnowledge = MoodleDateKnowledge.ExtractionFailed;
 
@@ -101,7 +105,7 @@ public static class MoodleAssignmentExtractor
             "آخر تعديل للتسليم", "آخر تعديل", "وقت التسليم", "تاريخ ووقت التسليم");
         var submittedTime = FindTime(snapshot.TimeValues,
             "last modified", "submission date", "submitted on", "آخر تعديل", "وقت التسليم", "تاريخ ووقت التسليم");
-        var submittedAt = ParseDate(submittedRow?.Value ?? submittedTime?.Label, submittedRow?.Iso ?? submittedTime?.Value);
+        var submittedAt = ParseDate(submittedRow?.Value ?? submittedTime?.Label, submittedRow?.Iso ?? submittedTime?.Value, timeZoneId);
 
         var submissionRow = FindRow(snapshot.Rows, "submission status", "حالة التسليم", "حالة الإرسال", "حالة التقديم");
         var remainingRow = FindRow(snapshot.Rows, "time remaining", "الوقت المتبقي", "الوقت المتبقي للتسليم");
@@ -116,11 +120,11 @@ public static class MoodleAssignmentExtractor
 
         var availableRow = FindRow(snapshot.Rows, "allow submissions from", "available from", "opens", "opened", "السماح بالتسليم من", "متاح ابتداء", "متاح من", "يفتح");
         var availableTime = FindTime(snapshot.TimeValues, "allow submissions from", "available from", "opens", "opened", "السماح بالتسليم من", "متاح ابتداء", "متاح من", "يفتح");
-        var available = ParseDate(availableRow?.Value ?? availableTime?.Label, availableRow?.Iso ?? availableTime?.Value);
+        var available = ParseDate(availableRow?.Value ?? availableTime?.Label, availableRow?.Iso ?? availableTime?.Value, timeZoneId);
 
-        var cutoffRow = FindRow(snapshot.Rows, "cut-off date", "cutoff date", "cut off date", "آخر موعد", "تاريخ الإغلاق", "موعد الإغلاق");
-        var cutoffTime = FindTime(snapshot.TimeValues, "cut-off date", "cutoff date", "cut off date", "آخر موعد", "تاريخ الإغلاق", "موعد الإغلاق");
-        var cutoff = ParseDate(cutoffRow?.Value ?? cutoffTime?.Label, cutoffRow?.Iso ?? cutoffTime?.Value);
+        var cutoffRow = FindRow(snapshot.Rows, "cut-off date", "cutoff date", "cut off date", "آخر موعد للتسليم", "آخر موعد", "تاريخ الإغلاق", "موعد الإغلاق");
+        var cutoffTime = FindTime(snapshot.TimeValues, "cut-off date", "cutoff date", "آخر موعد للتسليم", "آخر موعد", "تاريخ الإغلاق", "موعد الإغلاق");
+        var cutoff = ParseDate(cutoffRow?.Value ?? cutoffTime?.Label, cutoffRow?.Iso ?? cutoffTime?.Value, timeZoneId);
 
         return new MoodleAssignment(title, course, url, string.IsNullOrWhiteSpace(snapshot.Description) ? null : snapshot.Description,
             dueAt, dueKnowledge, available, cutoff, status, submittedAt, gradingStatus, acceptance);
@@ -152,19 +156,22 @@ public static class MoodleAssignmentExtractor
             || normalized.StartsWith(target + " ", StringComparison.OrdinalIgnoreCase);
     }
 
-    public static (DateTimeOffset? Value, MoodleDateKnowledge Knowledge) ParseDueDate(string? text, string? isoValue = null)
+    public static (DateTimeOffset? Value, MoodleDateKnowledge Knowledge) ParseDueDate(string? text, string? isoValue = null, string timeZoneId = "Asia/Gaza")
     {
         var source = string.IsNullOrWhiteSpace(isoValue) ? text : isoValue;
-        if (TryDate(source, out var date)) return (date, MoodleDateKnowledge.Known);
+        if (long.TryParse(source, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unsetTimestamp) && unsetTimestamp == 0)
+            return (null, MoodleDateKnowledge.NoDeadline);
+        if (TryDate(source, timeZoneId, out var date)) return (date, MoodleDateKnowledge.Known);
         if (!string.IsNullOrWhiteSpace(text) && Has(Normalize(text), "no due date", "no deadline", "بدون موعد نهائي", "لا يوجد موعد نهائي", "لا يوجد تاريخ استحقاق"))
             return (null, MoodleDateKnowledge.NoDeadline);
         return (null, MoodleDateKnowledge.Unknown);
     }
 
-    public static DateTimeOffset? ParseDate(string? text, string? isoValue = null)
+    public static DateTimeOffset? ParseDate(string? text, string? isoValue = null, string timeZoneId = "Asia/Gaza")
     {
         var source = string.IsNullOrWhiteSpace(isoValue) ? text : isoValue;
-        return TryDate(source, out var value) ? value : null;
+        if (long.TryParse(source, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unsetTimestamp) && unsetTimestamp == 0) return null;
+        return TryDate(source, timeZoneId, out var value) ? value : null;
     }
 
     public static IReadOnlyList<MoodleAssignment> Deduplicate(IEnumerable<MoodleAssignment> assignments) => assignments
@@ -205,22 +212,80 @@ public static class MoodleAssignmentExtractor
     }
 
     public static IReadOnlyList<MoodleAssignment> Sort(IReadOnlyList<MoodleAssignment> assignments, DateTimeOffset now) => assignments
-        .OrderBy(a => a.DueDateKnowledge == MoodleDateKnowledge.Known && a.DueAt >= now ? 0 : IsOverdue(a, now) ? 1 : a.DueDateKnowledge == MoodleDateKnowledge.Known ? 2 : 3)
+        .OrderBy(a => SortGroup(a, now))
         .ThenBy(a => a.DueAt ?? DateTimeOffset.MaxValue)
         .ThenBy(a => a.Course, StringComparer.CurrentCulture)
         .ToList();
 
+    public static bool IsConfirmedSubmitted(MoodleAssignment assignment) =>
+        assignment.Status is MoodleAssignmentStatus.Submitted or MoodleAssignmentStatus.SubmittedLate or MoodleAssignmentStatus.Graded;
+
+    private static int SortGroup(MoodleAssignment assignment, DateTimeOffset now)
+    {
+        if (IsConfirmedSubmitted(assignment)) return 0;
+        if (assignment.DueDateKnowledge == MoodleDateKnowledge.Known && assignment.DueAt.HasValue &&
+            assignment.Status is MoodleAssignmentStatus.NotSubmitted or MoodleAssignmentStatus.Draft)
+            return assignment.DueAt.Value >= now ? 1 : 2;
+        if (assignment.DueDateKnowledge is MoodleDateKnowledge.Unknown or MoodleDateKnowledge.ExtractionFailed) return 3;
+        if (assignment.DueDateKnowledge == MoodleDateKnowledge.NoDeadline) return 4;
+        return 3;
+    }
+
     public static bool IsOverdue(MoodleAssignment assignment, DateTimeOffset now) =>
         assignment.DueDateKnowledge == MoodleDateKnowledge.Known && assignment.DueAt < now &&
-        assignment.Status is MoodleAssignmentStatus.NotSubmitted or MoodleAssignmentStatus.Draft or MoodleAssignmentStatus.Unavailable;
+        assignment.Status is MoodleAssignmentStatus.NotSubmitted or MoodleAssignmentStatus.Draft;
 
-    private static bool TryDate(string? input, out DateTimeOffset date)
+    private static bool TryDate(string? input, string timeZoneId, out DateTimeOffset date)
     {
         input = input?.Trim();
-        if (!string.IsNullOrEmpty(input) && DateTimeOffset.TryParse(input, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out date)) return true;
-        if (!string.IsNullOrEmpty(input) && DateTimeOffset.TryParse(input, CultureInfo.GetCultureInfo("ar"), DateTimeStyles.AssumeUniversal, out date)) return true;
+        if (string.IsNullOrEmpty(input)) { date = default; return false; }
+
+        // Moodle can expose Unix timestamps through data-timestamp (seconds or milliseconds).
+        if (long.TryParse(input, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unix))
+        {
+            try
+            {
+                date = input.Length >= 13
+                    ? DateTimeOffset.FromUnixTimeMilliseconds(unix)
+                    : DateTimeOffset.FromUnixTimeSeconds(unix);
+                return true;
+            }
+            catch (ArgumentOutOfRangeException) { }
+        }
+
+        input = NormalizeDigits(input).Replace('\u200e', ' ').Replace('\u200f', ' ').Replace('،', ',').Trim();
+        var hasExplicitOffset = Regex.IsMatch(input, @"(?:Z|[+-]\d{2}:?\d{2})$", RegexOptions.IgnoreCase);
+        if (hasExplicitOffset && DateTimeOffset.TryParse(input, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out date)) return true;
+
+        // Moodle's human-readable dates have no offset. Interpret them in the configured
+        // Moodle account timezone, rather than silently assigning the server's UTC timezone.
+        foreach (var culture in new[] { CultureInfo.GetCultureInfo("en"), CultureInfo.GetCultureInfo("ar"), CultureInfo.GetCultureInfo("ar-PS") })
+        {
+            if (!DateTime.TryParse(input, culture, DateTimeStyles.AllowWhiteSpaces, out var localDate)) continue;
+            try
+            {
+                var moodleZone = TimeZoneInfo.FindSystemTimeZoneById(timeZoneId);
+                var unspecified = DateTime.SpecifyKind(localDate, DateTimeKind.Unspecified);
+                date = new DateTimeOffset(unspecified, moodleZone.GetUtcOffset(unspecified));
+                return true;
+            }
+            catch (TimeZoneNotFoundException) { }
+            catch (InvalidTimeZoneException) { }
+        }
         date = default;
         return false;
+    }
+
+    private static string NormalizeDigits(string value)
+    {
+        var builder = new System.Text.StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            if (character is >= '\u0660' and <= '\u0669') builder.Append((char)('0' + character - '\u0660'));
+            else if (character is >= '\u06f0' and <= '\u06f9') builder.Append((char)('0' + character - '\u06f0'));
+            else builder.Append(character);
+        }
+        return builder.ToString();
     }
 
     private static string CanonicalUrl(string value)

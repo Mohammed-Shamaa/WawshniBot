@@ -35,12 +35,71 @@ public sealed class MoodleAssignmentExtractorTests
         Assert.Equal(TimeSpan.FromHours(2), parsed.Value!.Value.Offset);
     }
 
+    [Fact]
+    public void Cutoff_is_not_used_as_due_date_and_submission_time_is_kept_separate()
+    {
+        var result = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot
+        {
+            Title = "Assignment page",
+            Rows =
+            [
+                new() { Label = "تاريخ التسليم", Value = "25 نوفمبر 2026، 11:59 م", Iso = "2026-11-25T21:59:00Z" },
+                new() { Label = "آخر موعد للتسليم", Value = "27 نوفمبر 2026، 11:59 م", Iso = "2026-11-27T21:59:00Z" },
+                new() { Label = "Last modified (submission)", Value = "24 November 2026, 1:15 PM", Iso = "2026-11-24T11:15:00Z" },
+                new() { Label = "Submission status", Value = "Submitted for grading" }
+            ]
+        }, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=212", "Research", "Asia/Gaza");
+
+        Assert.NotNull(result);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-25T21:59:00Z"), result.DueAt);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-27T21:59:00Z"), result.CutoffAt);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-24T11:15:00Z"), result.SubmittedAt);
+    }
+
+    [Fact]
+    public void Submission_timestamp_never_becomes_due_date()
+    {
+        var result = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot
+        {
+            Title = "Submitted assignment",
+            Rows = [new() { Label = "Last modified (submission)", Value = "24 November 2026, 1:15 PM", Iso = "2026-11-24T11:15:00Z" }]
+        }, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=213", "Research");
+
+        Assert.NotNull(result);
+        Assert.Null(result.DueAt);
+        Assert.Equal(MoodleDateKnowledge.Unknown, result.DueDateKnowledge);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-24T11:15:00Z"), result.SubmittedAt);
+    }
+
+    [Theory]
+    [InlineData("25 November 2026, 11:59 PM", "Asia/Gaza", 2)]
+    [InlineData("٢٥ نوفمبر ٢٠٢٦، ١١:٥٩ م", "Asia/Gaza", 2)]
+    [InlineData("25 November 2026, 11:59 PM", "UTC", 0)]
+    public void Localized_wall_clock_dates_use_the_configured_moodle_timezone(string value, string timezone, int expectedOffsetHours)
+    {
+        var parsed = MoodleAssignmentExtractor.ParseDueDate(value, timeZoneId: timezone);
+        Assert.Equal(MoodleDateKnowledge.Known, parsed.Knowledge);
+        Assert.Equal(expectedOffsetHours, parsed.Value!.Value.Offset.TotalHours);
+        Assert.Equal(25, parsed.Value.Value.Day);
+        Assert.Equal(23, parsed.Value.Value.Hour);
+        Assert.Equal(59, parsed.Value.Value.Minute);
+    }
+
+    [Fact]
+    public void Moodle_zero_timestamp_means_unconfigured_deadline_not_unix_epoch()
+    {
+        Assert.Equal(MoodleDateKnowledge.NoDeadline, MoodleAssignmentExtractor.ParseDueDate(null, "0").Knowledge);
+        Assert.Null(MoodleAssignmentExtractor.ParseDate(null, "0"));
+    }
+
     [Theory]
     [InlineData("Nothing submitted for this assignment", MoodleAssignmentStatus.NotSubmitted)]
     [InlineData("Draft (not submitted)", MoodleAssignmentStatus.Draft)]
     [InlineData("Submitted for grading", MoodleAssignmentStatus.Submitted)]
     [InlineData("Submitted late", MoodleAssignmentStatus.SubmittedLate)]
     [InlineData("Graded", MoodleAssignmentStatus.Graded)]
+    [InlineData("Not graded", MoodleAssignmentStatus.Unavailable)]
+    [InlineData("لم يتم التقييم", MoodleAssignmentStatus.Unavailable)]
     [InlineData("يحتاج إلى تعديل", MoodleAssignmentStatus.NeedsRevision)]
     [InlineData("غير معروف", MoodleAssignmentStatus.Unavailable)]
     public void Status_mapping_requires_actual_text(string text, MoodleAssignmentStatus expected) => Assert.Equal(expected, MoodleAssignmentExtractor.MapStatus(text));
@@ -165,6 +224,24 @@ public sealed class MoodleAssignmentExtractorTests
         Assert.Equal(new[] { "later", "overdue", "unknown" }, MoodleAssignmentExtractor.Sort(assignments, now).Select(a => a.Title));
         Assert.True(MoodleAssignmentExtractor.IsOverdue(assignments[2], now));
         Assert.False(MoodleAssignmentExtractor.IsOverdue(assignments[0], now));
+    }
+
+    [Fact]
+    public void Sorts_submitted_then_nearest_future_then_overdue_then_unknown_then_no_deadline()
+    {
+        var now = DateTimeOffset.Parse("2026-11-25T12:00:00+02:00");
+        var assignments = new[]
+        {
+            Assignment("no deadline", "https://x.test/1", null, MoodleDateKnowledge.NoDeadline),
+            Assignment("overdue", "https://x.test/2", now.AddDays(-1)) with { Status = MoodleAssignmentStatus.NotSubmitted },
+            Assignment("far future", "https://x.test/3", now.AddDays(4)),
+            Assignment("submitted", "https://x.test/4", now.AddDays(-2)) with { Status = MoodleAssignmentStatus.Submitted },
+            Assignment("unknown", "https://x.test/5", null, MoodleDateKnowledge.ExtractionFailed),
+            Assignment("near future", "https://x.test/6", now.AddHours(1))
+        };
+
+        Assert.Equal(new[] { "submitted", "near future", "far future", "overdue", "unknown", "no deadline" },
+            MoodleAssignmentExtractor.Sort(assignments, now).Select(a => a.Title));
     }
 
     [Fact]

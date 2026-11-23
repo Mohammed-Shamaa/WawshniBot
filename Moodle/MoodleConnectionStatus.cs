@@ -8,6 +8,7 @@ public sealed class MoodleOptions
     public Uri BaseUrl { get; set; } = new("https://moodle.iugaza.edu.ps/");
     public int ScanIntervalMinutes { get; set; } = 10;
     public int LoginTimeoutSeconds { get; set; } = 45;
+    public string TimeZoneId { get; set; } = "Asia/Gaza";
     public string? SessionEncryptionKey { get; set; }
     public short SessionEncryptionKeyVersion { get; set; } = 1;
     public Dictionary<string, string> PreviousSessionEncryptionKeys { get; set; } = [];

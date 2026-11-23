@@ -31,6 +31,7 @@
     <Compile Include="..\Security\TelegramUserAuthorization.cs" Link="Security\TelegramUserAuthorization.cs" />
     <Compile Include="..\Services\NeonDatabaseReadiness.cs" Link="Services\NeonDatabaseReadiness.cs" />
     <Compile Include="..\Handlers\MessageHandler.cs" Link="Handlers\MessageHandler.cs" />
+    <Compile Include="..\Handlers\MoodleAssignmentMessageFormatter.cs" Link="Handlers\MoodleAssignmentMessageFormatter.cs" />
     <Compile Include="..\Services\TelegramBotService.cs" Link="Services\TelegramBotService.cs" />
     <Compile Include="..\Moodle\MoodleAssignmentExtractor.cs" Link="Moodle\MoodleAssignmentExtractor.cs" />
   </ItemGroup>

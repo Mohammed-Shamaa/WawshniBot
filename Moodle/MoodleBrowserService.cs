@@ -515,7 +515,7 @@ public sealed class MoodleBrowserService(
           const text = e => (e?.innerText || e?.textContent || '').replace(/\s+/g, ' ').trim();
           const title = text(document.querySelector('h1')) || text(document.querySelector('[data-region="activity-header"] h1'));
           const body = text(document.body);
-          const timeValues = [...document.querySelectorAll('time[datetime]')].map(e => ({ label: text(e.parentElement?.parentElement || e.parentElement), value: e.getAttribute('datetime') }));
+          const timeValues = [...document.querySelectorAll('time[datetime], time[data-timestamp]')].map(e => ({ label: text(e.parentElement?.parentElement || e.parentElement), value: e.getAttribute('datetime') || e.getAttribute('data-timestamp') }));
           const rowElements = [...new Set(document.querySelectorAll('.submissionstatustable tr, .generaltable tr, [data-region="assign-info"] tr, #page-mod-assign-view tr'))];
           const rows = rowElements.map(r => {
             const cells = [...r.querySelectorAll(':scope > th, :scope > td')];
@@ -523,21 +523,52 @@ public sealed class MoodleBrowserService(
             const valueCells = cells.filter(c => c !== labelCell);
             const label = text(labelCell) || text(r.querySelector('.col-1, dt'));
             const value = valueCells.map(text).filter(Boolean).join(' ') || text(r.querySelector('.col-2, dd'));
-            return { label, value, iso: r.querySelector('time[datetime]')?.getAttribute('datetime') || null };
+            const time = r.querySelector('time[datetime], time[data-timestamp]');
+            const timestamp = r.querySelector('[data-timestamp]')?.getAttribute('data-timestamp');
+            return { label, value, iso: time?.getAttribute('datetime') || time?.getAttribute('data-timestamp') || timestamp || null };
           }).filter(r => r.label);
           for (const term of document.querySelectorAll('dl')) {
             const terms = [...term.querySelectorAll(':scope > dt')];
             for (const dt of terms) {
               const dd = dt.nextElementSibling;
-              if (dd?.tagName === 'DD') rows.push({ label: text(dt), value: text(dd), iso: dd.querySelector('time[datetime]')?.getAttribute('datetime') || null });
+              if (dd?.tagName === 'DD') rows.push({ label: text(dt), value: text(dd), iso: dd.querySelector('time[datetime]')?.getAttribute('datetime') || dd.querySelector('[data-timestamp]')?.getAttribute('data-timestamp') || null });
             }
+          }
+          // Moodle themes can render assignment dates in the activity header rather than
+          // the submission status table. Read each labelled activity-dates item separately.
+          for (const container of document.querySelectorAll('.activity-dates, [data-region="activity-dates"]')) {
+            const entries = [...container.children].length ? [...container.children] : [container];
+            for (const entry of entries) {
+              const labelNode = entry.querySelector('strong, b, dt, .activity-date-label');
+              let label = text(labelNode).replace(/[：:]$/, '').trim();
+              let value = '';
+              if (labelNode) {
+                const copy = entry.cloneNode(true);
+                const copyLabel = copy.querySelector('strong, b, dt, .activity-date-label');
+                copyLabel?.remove();
+                value = text(copy);
+              } else {
+                const parts = text(entry).split(/[：:]/, 2);
+                if (parts.length === 2) [label, value] = parts.map(part => part.trim());
+              }
+              const time = entry.querySelector('time[datetime], time[data-timestamp]');
+              const timestamp = entry.querySelector('[data-timestamp]')?.getAttribute('data-timestamp');
+              if (label && (value || time || timestamp))
+                rows.push({ label, value: value || text(time), iso: time?.getAttribute('datetime') || time?.getAttribute('data-timestamp') || timestamp || null });
+            }
+          }
+          for (const element of document.querySelectorAll('[data-due-date], [data-duedate], [data-cutoff-date], [data-cutoffdate]')) {
+            const due = element.getAttribute('data-due-date') || element.getAttribute('data-duedate');
+            const cutoff = element.getAttribute('data-cutoff-date') || element.getAttribute('data-cutoffdate');
+            if (due) rows.push({ label: 'Due date', value: '', iso: due });
+            if (cutoff) rows.push({ label: 'Cut-off date', value: '', iso: cutoff });
           }
           const description = text(document.querySelector('.activity-description, [data-region="activity-description"], #intro'));
           return JSON.stringify({ title, body, description, timeValues, rows });
         }
         """);
         var data = MoodleAssignmentExtractor.ParsePageSnapshot(dataJson);
-        return MoodleAssignmentExtractor.ParseAssignmentPage(data, SafeAssignmentUrl(page.Url), courseName);
+        return MoodleAssignmentExtractor.ParseAssignmentPage(data, SafeAssignmentUrl(page.Url), courseName, options.Value.TimeZoneId);
     }
 
     private sealed class CourseLink { public string Href { get; set; } = ""; public string Name { get; set; } = ""; }
