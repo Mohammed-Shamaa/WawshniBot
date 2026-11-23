@@ -192,6 +192,31 @@ public sealed class MoodleAssignmentExtractorTests
         Assert.Equal(MoodleGradingStatus.NotGraded, result.GradingStatus);
     }
 
+    [Fact]
+    public void Parses_arabic_assignment_details_as_rendered_by_the_users_moodle_page()
+    {
+        var result = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot
+        {
+            Title = "Accelerometer sensor",
+            Rows =
+            [
+                new() { Label = "تستحق", Value = "السبت، 17 أكتوبر 2026، 11:59 PM" },
+                new() { Label = "حالة التسليم", Value = "مسلمة للتقييم" },
+                new() { Label = "حالة التقييم", Value = "لم يتم التقييم" },
+                new() { Label = "الزمن المتبقي", Value = "تم تسليم الواجب 2 أيام و12 ساعات باكراً" },
+                new() { Label = "آخر تعديل", Value = "الخميس، 15 أكتوبر 2026، 11:30 AM" }
+            ]
+        }, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=81238", "الحوسبة المنتشرة - عملي");
+
+        Assert.NotNull(result);
+        Assert.Equal(MoodleAssignmentStatus.Submitted, result.Status);
+        Assert.Equal(MoodleGradingStatus.NotGraded, result.GradingStatus);
+        Assert.Equal(MoodleDateKnowledge.Known, result.DueDateKnowledge);
+        Assert.Equal(new DateTime(2026, 10, 17, 23, 59, 0),
+            DateTime.SpecifyKind(result.DueAt!.Value.DateTime, DateTimeKind.Unspecified));
+        Assert.Equal(DateTimeOffset.Parse("2026-10-15T11:30:00+03:00"), result.SubmittedAt);
+    }
+
     [Theory]
     [InlineData("25 November 2026, 11:59 PM", "Asia/Gaza", 2, 25)]
     [InlineData("٢٥ نوفمبر ٢٠٢٦، ١١:٥٩ م", "Asia/Gaza", 2, 25)]

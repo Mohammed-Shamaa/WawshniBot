@@ -57,13 +57,13 @@ public static class MoodleAssignmentExtractor
     private static readonly string[] DueLabels =
     [
         "due date", "due", "deadline", "submission deadline", "موعد التسليم", "تاريخ التسليم",
-        "تاريخ الاستحقاق", "موعد الاستحقاق", "موعد نهائي", "الموعد النهائي", "التاريخ النهائي للتسليم",
+        "تاريخ الاستحقاق", "موعد الاستحقاق", "تستحق", "يستحق", "موعد نهائي", "الموعد النهائي", "التاريخ النهائي للتسليم",
         "تاريخ الاستحقاق للتسليم"
     ];
     private static readonly string[] SubmissionStatusLabels =
         ["submission status", "حالة التسليم", "حالة الإرسال", "حالة التقديم", "حالة الواجب"];
     private static readonly string[] TimeRemainingLabels =
-        ["time remaining", "الوقت المتبقي", "الوقت المتبقي للتسليم"];
+        ["time remaining", "الوقت المتبقي", "الوقت المتبقي للتسليم", "الزمن المتبقي"];
     private static readonly string[] GradingStatusLabels =
         ["grading status", "حالة التقييم", "حالة التصحيح"];
 
@@ -87,7 +87,7 @@ public static class MoodleAssignmentExtractor
         if (Has(value, "nothing submitted", "no submission", "no attempt", "not submitted", "لا يوجد تسليم", "لا توجد تسليمات", "لم يتم التسليم", "لم يتم تسليم", "لم تسلم", "لم يتم تقديم", "لم يقدم الواجب", "لم ترفع أي ملفات")) return MoodleAssignmentStatus.NotSubmitted;
         if (Has(value, "submitted", "تم التسليم", "تم تسليم", "تم الإرسال", "تم التقديم") && Has(value, "late", "متأخر", "متأخرا")) return MoodleAssignmentStatus.SubmittedLate;
         if (Has(value, "submitted late", "late submission", "تم التسليم متأخراً", "تم التسليم متأخرا", "تسليم متأخر", "بعد الموعد", "متأخر")) return MoodleAssignmentStatus.SubmittedLate;
-        if (Has(value, "submitted for grading", "submitted for marking", "submitted", "تم التسليم", "تم تسليم", "تم الإرسال", "تم التقديم", "تم رفع الواجب", "قيد التقييم", "قيد التصحيح")) return MoodleAssignmentStatus.Submitted;
+        if (Has(value, "submitted for grading", "submitted for marking", "submitted", "مسلمة للتقييم", "مسلمة للتصحيح", "تم التسليم", "تم تسليم", "تم الإرسال", "تم التقديم", "تم رفع الواجب", "قيد التقييم", "قيد التصحيح")) return MoodleAssignmentStatus.Submitted;
         return MoodleAssignmentStatus.Unavailable;
     }
 
@@ -158,8 +158,8 @@ public static class MoodleAssignmentExtractor
         var acceptanceText = string.Join(" ", new[] { remainingRow?.Value, snapshot.Body }.Where(value => !string.IsNullOrWhiteSpace(value)));
         var acceptance = MapSubmissionAcceptance(acceptanceText);
 
-        var availableRow = FindRow(snapshot.Rows, "allow submissions from", "available from", "opens", "opened", "السماح بالتسليم من", "متاح ابتداء", "متاح من", "يفتح");
-        var availableTime = FindTime(snapshot.TimeValues, "allow submissions from", "available from", "opens", "opened", "السماح بالتسليم من", "متاح ابتداء", "متاح من", "يفتح");
+        var availableRow = FindRow(snapshot.Rows, "allow submissions from", "available from", "opens", "opened", "السماح بالتسليم من", "متاح ابتداء", "متاح من", "يفتح", "فتحت");
+        var availableTime = FindTime(snapshot.TimeValues, "allow submissions from", "available from", "opens", "opened", "السماح بالتسليم من", "متاح ابتداء", "متاح من", "يفتح", "فتحت");
         var available = ParseDate(FirstNonBlank(availableRow?.Value, availableTime?.Label), availableRow?.Iso ?? availableTime?.Value, timeZoneId);
 
         var cutoffRow = FindRow(snapshot.Rows, "cut-off date", "cutoff date", "cut off date", "آخر موعد للتسليم", "آخر موعد", "تاريخ الإغلاق", "موعد الإغلاق");
