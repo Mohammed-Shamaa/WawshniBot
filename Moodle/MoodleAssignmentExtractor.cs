@@ -98,7 +98,7 @@ public static class MoodleAssignmentExtractor
         var dueRow = FindRow(snapshot.Rows, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
         var dueTime = FindTime(snapshot.TimeValues, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
         var dueBody = FindBodyValue(snapshot.BodyLines, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
-        var dueText = dueRow?.Value ?? dueTime?.Label ?? dueBody;
+        var dueText = FirstNonBlank(dueRow?.Value, dueTime?.Label, dueBody);
         var dueIso = dueRow?.Iso ?? dueTime?.Value;
         var (dueAt, dueKnowledge) = ParseDueDate(dueText, dueIso, timeZoneId);
         if (dueKnowledge == MoodleDateKnowledge.Unknown && (dueRow is not null || dueTime is not null))
@@ -109,16 +109,19 @@ public static class MoodleAssignmentExtractor
             "آخر تعديل للتسليم", "آخر تعديل", "وقت التسليم", "تاريخ ووقت التسليم");
         var submittedTime = FindTime(snapshot.TimeValues,
             "last modified", "submission date", "submitted on", "آخر تعديل", "وقت التسليم", "تاريخ ووقت التسليم");
-        var submittedAt = ParseDate(submittedRow?.Value ?? submittedTime?.Label, submittedRow?.Iso ?? submittedTime?.Value, timeZoneId);
+        var submittedAt = ParseDate(FirstNonBlank(submittedRow?.Value, submittedTime?.Label), submittedRow?.Iso ?? submittedTime?.Value, timeZoneId);
 
         var submissionRow = FindRow(snapshot.Rows, "submission status", "حالة التسليم", "حالة الإرسال", "حالة التقديم");
         var remainingRow = FindRow(snapshot.Rows, "time remaining", "الوقت المتبقي", "الوقت المتبقي للتسليم");
-        var submissionText = submissionRow?.Value ?? FindBodyValue(snapshot.BodyLines, "submission status", "حالة التسليم", "حالة الإرسال", "حالة التقديم");
-        var remainingText = remainingRow?.Value ?? FindBodyValue(snapshot.BodyLines, "time remaining", "الوقت المتبقي", "الوقت المتبقي للتسليم");
+        var submissionText = FirstNonBlank(submissionRow?.Value,
+            FindBodyValue(snapshot.BodyLines, "submission status", "حالة التسليم", "حالة الإرسال", "حالة التقديم"));
+        var remainingText = FirstNonBlank(remainingRow?.Value,
+            FindBodyValue(snapshot.BodyLines, "time remaining", "الوقت المتبقي", "الوقت المتبقي للتسليم"));
         var statusText = string.Join(" ", new[] { submissionText, remainingText }.Where(value => !string.IsNullOrWhiteSpace(value)));
         var status = MapStatus(statusText);
         var gradingRow = FindRow(snapshot.Rows, "grading status", "حالة التقييم", "حالة التصحيح");
-        var gradingText = gradingRow?.Value ?? FindBodyValue(snapshot.BodyLines, "grading status", "حالة التقييم", "حالة التصحيح");
+        var gradingText = FirstNonBlank(gradingRow?.Value,
+            FindBodyValue(snapshot.BodyLines, "grading status", "حالة التقييم", "حالة التصحيح"));
         var gradingStatus = MapGradingStatus(gradingText);
         if (status == MoodleAssignmentStatus.Unavailable && gradingStatus == MoodleGradingStatus.NeedsChanges)
             status = MoodleAssignmentStatus.NeedsRevision;
@@ -127,11 +130,11 @@ public static class MoodleAssignmentExtractor
 
         var availableRow = FindRow(snapshot.Rows, "allow submissions from", "available from", "opens", "opened", "السماح بالتسليم من", "متاح ابتداء", "متاح من", "يفتح");
         var availableTime = FindTime(snapshot.TimeValues, "allow submissions from", "available from", "opens", "opened", "السماح بالتسليم من", "متاح ابتداء", "متاح من", "يفتح");
-        var available = ParseDate(availableRow?.Value ?? availableTime?.Label, availableRow?.Iso ?? availableTime?.Value, timeZoneId);
+        var available = ParseDate(FirstNonBlank(availableRow?.Value, availableTime?.Label), availableRow?.Iso ?? availableTime?.Value, timeZoneId);
 
         var cutoffRow = FindRow(snapshot.Rows, "cut-off date", "cutoff date", "cut off date", "آخر موعد للتسليم", "آخر موعد", "تاريخ الإغلاق", "موعد الإغلاق");
         var cutoffTime = FindTime(snapshot.TimeValues, "cut-off date", "cutoff date", "آخر موعد للتسليم", "آخر موعد", "تاريخ الإغلاق", "موعد الإغلاق");
-        var cutoff = ParseDate(cutoffRow?.Value ?? cutoffTime?.Label, cutoffRow?.Iso ?? cutoffTime?.Value, timeZoneId);
+        var cutoff = ParseDate(FirstNonBlank(cutoffRow?.Value, cutoffTime?.Label), cutoffRow?.Iso ?? cutoffTime?.Value, timeZoneId);
 
         return new MoodleAssignment(title, course, url, string.IsNullOrWhiteSpace(snapshot.Description) ? null : snapshot.Description,
             dueAt, dueKnowledge, available, cutoff, status, submittedAt, gradingStatus, acceptance);
@@ -175,6 +178,9 @@ public static class MoodleAssignmentExtractor
         }
         return null;
     }
+
+    private static string? FirstNonBlank(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
 
     private static bool IsKnownFieldLabel(string value) =>
         new[] { "submission status", "grading status", "time remaining", "last modified", "حالة التسليم", "حالة الإرسال", "حالة التقديم", "حالة التقييم", "حالة التصحيح", "الوقت المتبقي", "آخر تعديل" }

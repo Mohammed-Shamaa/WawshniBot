@@ -126,6 +126,32 @@ public sealed class MoodleAssignmentExtractorTests
         Assert.Equal(expected, result.Status);
     }
 
+    [Fact]
+    public void Falls_back_to_visible_text_when_a_matching_table_row_has_an_empty_value()
+    {
+        var result = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot
+        {
+            Title = "Assignment 1",
+            Rows =
+            [
+                new() { Label = "Due", Value = "" },
+                new() { Label = "Submission status", Value = "" }
+            ],
+            BodyLines =
+            [
+                "Due",
+                "Tuesday, 1 December 2026, 11:59 PM",
+                "Submission status",
+                "Submitted for grading"
+            ]
+        }, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=81235", "نظم التشغيل - عملي");
+
+        Assert.NotNull(result);
+        Assert.Equal(DateTimeOffset.Parse("2026-12-01T21:59:00Z"), result.DueAt);
+        Assert.Equal(MoodleDateKnowledge.Known, result.DueDateKnowledge);
+        Assert.Equal(MoodleAssignmentStatus.Submitted, result.Status);
+    }
+
     [Theory]
     [InlineData("25 November 2026, 11:59 PM", "Asia/Gaza", 2)]
     [InlineData("٢٥ نوفمبر ٢٠٢٦، ١١:٥٩ م", "Asia/Gaza", 2)]

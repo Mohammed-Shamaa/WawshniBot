@@ -655,16 +655,19 @@ public sealed class MoodleBrowserService(
         }
         """);
         var data = MoodleAssignmentExtractor.ParsePageSnapshot(dataJson);
-        logger.LogInformation("Moodle assignment page snapshot contains {RowCount} table rows and {BodyLineCount} text lines; submission status label detected {SubmissionStatusDetected}.",
-            data.Rows.Count, data.BodyLines.Count, data.Rows.Any(row => row.Label.Contains("submission status", StringComparison.OrdinalIgnoreCase)
+        var submissionStatusLabelDetected = data.Rows.Any(row => row.Label.Contains("submission status", StringComparison.OrdinalIgnoreCase)
                 || row.Label.Contains("حالة التسليم", StringComparison.OrdinalIgnoreCase)
                 || row.Label.Contains("حالة الإرسال", StringComparison.OrdinalIgnoreCase)
-                || row.Label.Contains("حالة التقديم", StringComparison.OrdinalIgnoreCase)
-                || data.BodyLines.Any(line => line.Contains("submission status", StringComparison.OrdinalIgnoreCase)
-                    || line.Contains("حالة التسليم", StringComparison.OrdinalIgnoreCase)
-                    || line.Contains("حالة الإرسال", StringComparison.OrdinalIgnoreCase)
-                    || line.Contains("حالة التقديم", StringComparison.OrdinalIgnoreCase))));
-        return MoodleAssignmentExtractor.ParseAssignmentPage(data, SafeAssignmentUrl(page.Url), courseName, options.Value.TimeZoneId);
+                || row.Label.Contains("حالة التقديم", StringComparison.OrdinalIgnoreCase))
+            || data.BodyLines.Any(line => line.Contains("submission status", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("حالة التسليم", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("حالة الإرسال", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("حالة التقديم", StringComparison.OrdinalIgnoreCase));
+        var assignment = MoodleAssignmentExtractor.ParseAssignmentPage(data, SafeAssignmentUrl(page.Url), courseName, options.Value.TimeZoneId);
+        logger.LogInformation("Moodle assignment DOM snapshot contains {RowCount} table rows and {BodyLineCount} text lines; status label detected {StatusLabelDetected}; parsed status {SubmissionStatus}; deadline state {DeadlineState}.",
+            data.Rows.Count, data.BodyLines.Count, submissionStatusLabelDetected,
+            assignment?.Status.ToString() ?? "unavailable", assignment?.DueDateKnowledge.ToString() ?? "unavailable");
+        return assignment;
     }
 
     private sealed class CourseLink { public string Href { get; set; } = ""; public string Name { get; set; } = ""; }
