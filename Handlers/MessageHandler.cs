@@ -3,11 +3,14 @@ using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Wawshni.Bot.Moodle;
 using Wawshni.Bot.Security;
+using Wawshni.Bot.Users;
+using Microsoft.Extensions.Options;
 
 namespace Wawshni.Bot.Handlers;
 
 public sealed class MessageHandler(
     TelegramUserAuthorization authorization,
+    TelegramUserRepository users,
     MoodleBrowserService moodleBrowser,
     MoodleSessionRepository sessions,
     ILogger<MessageHandler> logger)
@@ -18,18 +21,95 @@ public sealed class MessageHandler(
         Message message,
         Func<long, string, CancellationToken, Task> reply,
         Func<long, int, CancellationToken, Task> delete,
+        Func<long, string, Guid, CancellationToken, Task> adminRequest,
         CancellationToken cancellationToken)
     {
-        if (message.From is null || message.Chat is null || string.IsNullOrWhiteSpace(message.Text)) return;
-        if (!authorization.IsAuthorized(message.From.Id)) return;
+        if (message.From is null || message.Chat is null) return;
+        var userId = message.From.Id;
+        var isAdmin = await authorization.IsAdminAsync(userId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(message.Text))
+        {
+            if (!isAdmin)
+            {
+                var status = await authorization.GetStatusAsync(userId, cancellationToken);
+                await SafeReply(message.Chat.Id, status is null
+                    ? "لإنشاء طلب انضمامك إلى وشوشني، أرسل /start أولاً."
+                    : status == TelegramRegistrationStatus.Pending
+                        ? "طلبك قيد مراجعة المسؤول. أرسل /my_access لمعرفة الحالة."
+                        : status == TelegramRegistrationStatus.Rejected
+                            ? "حسابك غير معتمد لاستخدام وشوشني. أرسل /my_access لمعرفة الحالة."
+                            : "أرسل /help لعرض الأوامر المتاحة.", reply, cancellationToken);
+            }
+            return;
+        }
         if (message.Chat.Type != ChatType.Private)
         {
-            await SafeReply(message.Chat.Id, "استخدم البوت في محادثة خاصة لإدارة ربط Moodle.", reply, cancellationToken);
+            await SafeReply(message.Chat.Id, "استخدم البوت في محادثة خاصة لإدارة حسابك.", reply, cancellationToken);
             return;
         }
 
         var messageText = message.Text.Trim();
         var command = messageText.Split(' ', 2)[0].Split('@', 2)[0].ToLowerInvariant();
+        if (isAdmin)
+        {
+            if (await HandleAdminCommandAsync(command, messageText, userId, message.Chat.Id, reply, adminRequest, cancellationToken))
+                return;
+        }
+
+        if (command == "/start")
+        {
+            var registration = await users.RegisterPendingAsync(userId, message.From.FirstName, message.From.LastName, message.From.Username, cancellationToken);
+            switch (registration.User.Status)
+            {
+                case TelegramRegistrationStatus.Pending:
+                    await SafeReply(message.Chat.Id, registration.Created
+                        ? "أهلاً بك في وشوشني! 🎓\n\nمساعدك الجامعي الذكي المتصل بمنصة Moodle.\n\nتم استلام طلب انضمامك بنجاح، وطلبك الآن قيد مراجعة المسؤول.\n\nسيتم إشعارك فور اتخاذ قرار بشأن طلبك.\n\nشكراً لاهتمامك باستخدام وشوشني ❤️"
+                        : "طلبك قيد مراجعة المسؤول.", reply, cancellationToken);
+                    if (registration.Created && authorization.AdministratorId is long adminId)
+                    {
+                        var name = string.Join(" ", new[] { registration.User.FirstName, registration.User.LastName }.Where(s => !string.IsNullOrWhiteSpace(s)));
+                        if (string.IsNullOrWhiteSpace(name)) name = "غير متاح";
+                        var username = string.IsNullOrWhiteSpace(registration.User.Username) ? "غير متاح" : "@" + registration.User.Username;
+                        var notification = $"🔔 طلب انضمام جديد إلى وشوشني\n\n👤 الاسم: {name}\n🔹 Username: {username}\n🆔 Telegram ID: {userId}\n📅 تاريخ الطلب: {registration.User.RegisteredAt:yyyy-MM-dd HH:mm} UTC\n\nيرجى مراجعة الطلب واتخاذ القرار.";
+                        try { await adminRequest(adminId, notification, registration.User.RequestId, cancellationToken); }
+                        catch (Exception exception) when (exception is not OperationCanceledException)
+                        { logger.LogWarning("Could not notify administrator about pending registration ({ExceptionType}); request remains stored.", exception.GetType().Name); }
+                    }
+                    return;
+                case TelegramRegistrationStatus.Approved:
+                    await SafeReply(message.Chat.Id, "أهلاً بك في WawshniBot. أرسل /link لربط حساب Moodle، أو /help لعرض الأوامر.", reply, cancellationToken);
+                    return;
+                case TelegramRegistrationStatus.Rejected:
+                    await SafeReply(message.Chat.Id, "نعتذر، لم تتم الموافقة على طلب انضمامك إلى وشوشني. إذا كنت تعتقد أن هذا القرار صدر بالخطأ، يرجى التواصل مع مسؤول البوت.", reply, cancellationToken);
+                    return;
+            }
+        }
+
+        var registrationStatus = await authorization.GetStatusAsync(userId, cancellationToken);
+        if (command == "/my_access")
+        {
+            await SafeReply(message.Chat.Id, AccessStatusText(registrationStatus), reply, cancellationToken);
+            return;
+        }
+        if (command == "/help")
+        {
+            var help = registrationStatus == TelegramRegistrationStatus.Approved
+                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — واجباتي ومواعيدها\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء عملية الربط الحالية\n/my_access — حالة طلب الانضمام"
+                : "يمكنك استخدام /my_access لمعرفة حالة طلبك. لإرسال طلب انضمام أو إعادة عرضه أرسل /start.";
+            await SafeReply(message.Chat.Id, help, reply, cancellationToken);
+            return;
+        }
+        if (registrationStatus != TelegramRegistrationStatus.Approved)
+        {
+            _flows.TryRemove(userId, out _);
+            var notice = registrationStatus is null
+                ? "لإنشاء طلب انضمامك إلى وشوشني، أرسل /start أولاً."
+                : registrationStatus == TelegramRegistrationStatus.Pending
+                    ? "طلبك قيد مراجعة المسؤول. أرسل /my_access لمعرفة الحالة."
+                    : "حسابك غير معتمد لاستخدام وشوشني. أرسل /my_access لمعرفة الحالة.";
+            await SafeReply(message.Chat.Id, notice, reply, cancellationToken);
+            return;
+        }
         if (command == "/cancel")
         {
             _flows.TryRemove(message.From.Id, out _);
@@ -146,7 +226,166 @@ public sealed class MessageHandler(
             case var _ when messageText.StartsWith('/'): response = "لم أتعرف على هذا الأمر. أرسل /help."; break;
             default: response = "وصلتني رسالتك. أرسل /help لعرض الأوامر المتاحة."; break;
         }
+        if (!await authorization.IsApprovedAsync(userId, cancellationToken))
+        {
+            _flows.TryRemove(userId, out _);
+            await SafeReply(message.Chat.Id, "تم تغيير صلاحية حسابك أثناء تنفيذ الطلب؛ لم أرسل نتائج Moodle. تواصل مع مسؤول البوت.", reply, cancellationToken);
+            return;
+        }
         await SafeReply(message.Chat.Id, response, reply, cancellationToken);
+    }
+
+    public async Task HandleCallbackAsync(
+        CallbackQuery callback,
+        Func<long, string, CancellationToken, Task> reply,
+        Func<string, string, CancellationToken, Task> answer,
+        Func<long, int, string, CancellationToken, Task> edit,
+        CancellationToken cancellationToken)
+    {
+        var answered = false;
+        try
+        {
+            if (callback.From is null)
+            {
+                await answer(callback.Id, "تعذر التحقق من هوية المرسل.", cancellationToken);
+                answered = true;
+                return;
+            }
+            if (callback.Message is null || callback.Data is null)
+            {
+                await answer(callback.Id, "تعذر قراءة طلب المراجعة.", cancellationToken);
+                answered = true;
+                return;
+            }
+            if (!await authorization.IsAdminAsync(callback.From.Id, cancellationToken))
+            {
+                await answer(callback.Id, "هذا الإجراء مخصص لمسؤول البوت.", cancellationToken);
+                answered = true;
+                return;
+            }
+            var parts = callback.Data.Split(':', 3);
+            if (parts.Length != 3 || parts[0] != "reg" || !Guid.TryParse(parts[2], out var requestId) ||
+                (parts[1] != "approve" && parts[1] != "reject"))
+            {
+                await answer(callback.Id, "بيانات الطلب غير صالحة.", cancellationToken);
+                answered = true;
+                return;
+            }
+            var target = parts[1] == "approve" ? TelegramRegistrationStatus.Approved : TelegramRegistrationStatus.Rejected;
+            var registration = await users.TransitionPendingAsync(requestId, target, callback.From.Id, cancellationToken);
+            if (registration is null)
+            {
+                await answer(callback.Id, "الطلب غير موجود أو سبق اتخاذ قرار بشأنه.", cancellationToken);
+                answered = true;
+                var existing = await users.GetByRequestIdAsync(requestId, cancellationToken);
+                if (existing is not null)
+                    await edit(callback.Message.Chat.Id, callback.Message.MessageId,
+                        $"تمت معالجة الطلب مسبقاً: {StatusArabic(existing.Status)}.", cancellationToken);
+                return;
+            }
+            await answer(callback.Id, target == TelegramRegistrationStatus.Approved ? "تم قبول الطلب." : "تم رفض الطلب.", cancellationToken);
+            answered = true;
+            await NotifyApplicantAsync(registration, reply, cancellationToken);
+            await edit(callback.Message.Chat.Id, callback.Message.MessageId,
+                target == TelegramRegistrationStatus.Approved ? "تم قبول الطلب ✅" : "تم رفض الطلب ❌", cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning("Registration callback failed ({ExceptionType}).", exception.GetType().Name);
+            if (!answered)
+            {
+                try { await answer(callback.Id, "تعذر معالجة الطلب حالياً.", cancellationToken); }
+                catch (Exception answerException) when (answerException is not OperationCanceledException)
+                { logger.LogDebug("Could not acknowledge registration callback ({ExceptionType}).", answerException.GetType().Name); }
+            }
+        }
+    }
+
+    private async Task<bool> HandleAdminCommandAsync(string command, string messageText, long adminId, long chatId,
+        Func<long, string, CancellationToken, Task> reply,
+        Func<long, string, Guid, CancellationToken, Task> adminRequest,
+        CancellationToken cancellationToken)
+    {
+        var pieces = messageText.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        switch (command)
+        {
+            case "/start":
+                await SafeReply(chatId, "أهلاً بك في WawshniBot.\n/help لعرض الأوامر\n/pending_users لطلبات الانضمام\n/users لإحصاءات المستخدمين\n/approve <id> أو /reject <id> أو /revoke <id> لإدارة الصلاحيات.", reply, cancellationToken);
+                return true;
+            case "/help":
+                await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — الواجبات\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول أو إعادة قبول\n/reject <telegram_user_id> — رفض أو إلغاء اعتماد\n/revoke <telegram_user_id> — سحب اعتماد مستخدم", reply, cancellationToken);
+                return true;
+            case "/pending_users":
+                var pending = await users.GetPendingAsync(cancellationToken);
+                if (pending.Count == 0) { await SafeReply(chatId, "لا توجد طلبات انضمام معلّقة حالياً.", reply, cancellationToken); return true; }
+                foreach (var registration in pending)
+                {
+                    var name = string.Join(" ", new[] { registration.FirstName, registration.LastName }.Where(s => !string.IsNullOrWhiteSpace(s)));
+                    if (string.IsNullOrWhiteSpace(name)) name = "غير متاح";
+                    var username = string.IsNullOrWhiteSpace(registration.Username) ? "غير متاح" : "@" + registration.Username;
+                    await adminRequest(chatId, $"🔔 طلب انضمام معلّق\n👤 {name}\n🔹 Username: {username}\n🆔 {registration.TelegramUserId}\n📅 {registration.RegisteredAt:yyyy-MM-dd HH:mm} UTC", registration.RequestId, cancellationToken);
+                }
+                return true;
+            case "/users":
+                var counts = await users.GetCountsAsync(cancellationToken);
+                await SafeReply(chatId, $"إحصاءات المستخدمين:\nالإجمالي: {counts.Total}\nالمعتمدون: {counts.Approved}\nقيد المراجعة: {counts.Pending}\nالمرفوضون/المسحوب اعتمادهم: {counts.Rejected}", reply, cancellationToken);
+                return true;
+            case "/approve":
+            case "/reject":
+            case "/revoke":
+                if (pieces.Length != 2 || !long.TryParse(pieces[1], out var targetId) || targetId <= 0)
+                { await SafeReply(chatId, $"الاستخدام: {command} <telegram_user_id>", reply, cancellationToken); return true; }
+                if (targetId == adminId)
+                { await SafeReply(chatId, "لا يمكن تغيير صلاحية مسؤول البوت.", reply, cancellationToken); return true; }
+                var targetStatus = command == "/approve" ? TelegramRegistrationStatus.Approved : TelegramRegistrationStatus.Rejected;
+                IReadOnlyCollection<TelegramRegistrationStatus> allowed = command switch
+                {
+                    "/approve" => [TelegramRegistrationStatus.Pending, TelegramRegistrationStatus.Rejected],
+                    "/reject" => [TelegramRegistrationStatus.Pending, TelegramRegistrationStatus.Approved],
+                    _ => [TelegramRegistrationStatus.Approved]
+                };
+                var updated = await users.SetStatusAsync(targetId, targetStatus, adminId, allowed, cancellationToken);
+                if (updated is null)
+                {
+                    var current = await users.GetByTelegramIdAsync(targetId, cancellationToken);
+                    await SafeReply(chatId, current is null ? "لا يوجد طلب مسجل لهذا المعرّف." : $"لم يتغير الوضع؛ الحالة الحالية: {StatusArabic(current.Status)}.", reply, cancellationToken);
+                    return true;
+                }
+                await SafeReply(chatId, command == "/revoke" ? "تم سحب صلاحية المستخدم. بقيت جلسة Moodle المشفرة محفوظة لكنها لن تستخدم ما دام الحساب غير معتمد." : targetStatus == TelegramRegistrationStatus.Approved ? "تم اعتماد المستخدم." : "تم رفض المستخدم أو إلغاء اعتماده.", reply, cancellationToken);
+                await NotifyApplicantAsync(updated, reply, cancellationToken);
+                return true;
+            default:
+                break;
+        }
+        if (command == "/my_access")
+        {
+            await SafeReply(chatId, "حسابك مسؤول البوت ومعتمد دائماً.", reply, cancellationToken);
+            return true;
+        }
+        return false;
+    }
+
+    private static string AccessStatusText(TelegramRegistrationStatus? status) => status switch
+    {
+        TelegramRegistrationStatus.Pending => "طلبك قيد مراجعة المسؤول.",
+        TelegramRegistrationStatus.Approved => "حسابك معتمد، ويمكنك استخدام خدمات وشوشني.",
+        TelegramRegistrationStatus.Rejected => "حسابك غير معتمد لاستخدام وشوشني.",
+        _ => "لا يوجد طلب انضمام مسجل. أرسل /start لإنشاء طلب."
+    };
+
+    private static string StatusArabic(TelegramRegistrationStatus status) => status switch
+    {
+        TelegramRegistrationStatus.Pending => "قيد المراجعة", TelegramRegistrationStatus.Approved => "معتمد", _ => "مرفوض/مسحوب الاعتماد"
+    };
+
+    private async Task NotifyApplicantAsync(TelegramUserRegistration registration, Func<long, string, CancellationToken, Task> reply, CancellationToken cancellationToken)
+    {
+        var message = registration.Status == TelegramRegistrationStatus.Approved
+            ? "🎉 تمت الموافقة على طلب انضمامك إلى وشوشني!\n\nأصبح بإمكانك الآن ربط حسابك الجامعي من Moodle.\n\nأرسل /link للبدء."
+            : "نعتذر، لم تتم الموافقة على طلب انضمامك إلى وشوشني.\n\nإذا كنت تعتقد أن هذا القرار صدر بالخطأ، يرجى التواصل مع مسؤول البوت.";
+        try { await reply(registration.TelegramUserId, message, cancellationToken); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        { logger.LogWarning("Could not notify Telegram user about access decision ({ExceptionType}); database status was saved.", exception.GetType().Name); }
     }
 
     private async Task SafeReply(long chatId, string text, Func<long, string, CancellationToken, Task> reply, CancellationToken cancellationToken)

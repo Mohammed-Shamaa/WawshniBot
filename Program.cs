@@ -3,6 +3,8 @@ using Wawshni.Bot.Handlers;
 using Wawshni.Bot.Security;
 using Wawshni.Bot.Services;
 using Wawshni.Bot.Moodle;
+using Wawshni.Bot.Users;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 var port = Environment.GetEnvironmentVariable("PORT");
@@ -17,6 +19,7 @@ builder.Services.AddOptions<MoodleOptions>()
     .Validate(options => options.ScanIntervalMinutes >= 1, "Moodle:ScanIntervalMinutes must be at least one minute.")
     .ValidateOnStart();
 builder.Services.AddSingleton<TelegramUserAuthorization>();
+builder.Services.AddSingleton<TelegramUserRepository>();
 builder.Services.AddSingleton<MoodleConnectionStatus>();
 builder.Services.AddSingleton<MoodleSessionCrypto>();
 builder.Services.AddSingleton<MoodleSessionRepository>();
@@ -28,6 +31,11 @@ builder.Services.AddHostedService<Worker>();
 builder.Services.AddHostedService<SelfKeepAliveService>();
 
 var app = builder.Build();
+var telegramOptions = app.Services.GetRequiredService<IOptions<TelegramOptions>>().Value;
+if (telegramOptions.AuthorizedUserId is not long administratorId)
+    throw new InvalidOperationException("TelegramBot:AuthorizedUserId must be configured with the administrator's numeric Telegram user ID.");
+await app.Services.GetRequiredService<TelegramUserRepository>()
+    .EnsureSchemaAsync(administratorId, app.Lifetime.ApplicationStopping);
 app.MapGet("/health", () => Results.Json(new { status = "ok" }));
 app.MapGet("/health/ready", async (NeonDatabaseReadiness database, CancellationToken cancellationToken) =>
     await database.CanConnectAsync(cancellationToken)

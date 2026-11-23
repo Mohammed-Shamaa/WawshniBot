@@ -51,7 +51,23 @@ The optional self keep-alive requests the configured public `/health` URL every 
 
 ## Telegram commands
 
-Commands: `/link` (also `/connect_moodle`) starts an Arabic student ID/password flow; `/status` checks the saved session against Moodle; `/my_courses` returns course names read from the authenticated Moodle page; `/logout` deletes the session; `/cancel` cancels the current linking flow. These commands are private-chat-only and restricted to `TelegramBot__AuthorizedUserId`.
+### Registration and access
+
+Any student can open a private chat and send `/start`. The bot creates one persistent `Pending` registration in the `telegram_users` table and sends the configured administrator an inline Accept/Reject request. Repeated `/start` does not create duplicate rows or repeated notifications. Applicants can check `/my_access`; Pending and Rejected users cannot use Moodle commands. An Approved user links their own Moodle account.
+
+`TelegramBot__AuthorizedUserId` remains the single administrator ID. At startup, the app creates the additive `telegram_users` table and index if missing and ensures that configured administrator is `Approved`. This does not modify or delete `moodle_sessions`; the administrator's encrypted session remains intact. The equivalent repeatable SQL is in `Users/001_create_telegram_users.sql`. Neon PostgreSQL is required for persistent authorization; the service does not fall back to in-memory registrations.
+
+Administrator commands (only the configured Telegram ID can run these):
+
+- `/pending_users` — list Pending requests with Accept/Reject buttons.
+- `/users` — counts for all registrations by status.
+- `/approve <telegram_user_id>` — approve or re-approve a registered user.
+- `/reject <telegram_user_id>` — reject a request or revoke an approval.
+- `/revoke <telegram_user_id>` — revoke an Approved user's access.
+
+Revocation changes status to `Rejected`; the encrypted Moodle session is retained and becomes unusable while the user is unapproved. An administrator can later re-approve the same registration. Inline callbacks validate the actual Telegram sender ID and update only a still-Pending request.
+
+Moodle commands: `/link` (also `/connect_moodle`) starts an Arabic student ID/password flow; `/status` checks the saved session against Moodle; `/my_courses` returns course names read from the authenticated Moodle page; `/my_assignments` retrieves assignments; `/logout` deletes only that Telegram user's session; `/cancel` cancels that user's current linking flow. Each session is stored under its owner's Telegram numeric ID and each linking flow/browser operation is isolated by that ID.
 
 The password message is immediately passed to Telegram's delete API and the bot clears its local message and credential references as soon as the attempt finishes. If deletion fails, the bot asks for manual deletion. Telegram's delete API only removes a message from the chat and cannot guarantee removal from all Telegram systems or backups. The password is not stored in Postgres or browser storage. The saved Playwright storage state is AES-256-GCM encrypted; ciphertext, nonce, authentication tag, and key version are stored in Postgres. Chromium is launched only for link, status, or course commands and disposed after each operation.
 

@@ -13,6 +13,8 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="Telegram.Bot" Version="22.5.1" />
   </ItemGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
@@ -22,7 +24,14 @@
     <Compile Include="..\Moodle\MoodleSessionCrypto.cs" Link="Moodle\MoodleSessionCrypto.cs" />
     <Compile Include="..\Moodle\MoodleConnectionStatus.cs" Link="Moodle\MoodleConnectionStatus.cs" />
     <Compile Include="..\Moodle\MoodleCourseDomExtractor.cs" Link="Moodle\MoodleCourseDomExtractor.cs" />
-    <Compile Include="..\Moodle\MoodleAssignmentExtractor.cs" Link="Moodle\MoodleAssignmentExtractor.cs" />
     <Compile Include="..\Handlers\TelegramTextChunker.cs" Link="Handlers\TelegramTextChunker.cs" />
+    <Compile Include="..\Users\TelegramUserRegistration.cs" Link="Users\TelegramUserRegistration.cs" />
+    <Compile Include="..\Users\TelegramUserRepository.cs" Link="Users\TelegramUserRepository.cs" />
+    <Compile Include="..\TelegramOptions.cs" Link="TelegramOptions.cs" />
+    <Compile Include="..\Security\TelegramUserAuthorization.cs" Link="Security\TelegramUserAuthorization.cs" />
+    <Compile Include="..\Services\NeonDatabaseReadiness.cs" Link="Services\NeonDatabaseReadiness.cs" />
+    <Compile Include="..\Handlers\MessageHandler.cs" Link="Handlers\MessageHandler.cs" />
+    <Compile Include="..\Services\TelegramBotService.cs" Link="Services\TelegramBotService.cs" />
+    <Compile Include="..\Moodle\MoodleAssignmentExtractor.cs" Link="Moodle\MoodleAssignmentExtractor.cs" />
   </ItemGroup>
 </Project>
