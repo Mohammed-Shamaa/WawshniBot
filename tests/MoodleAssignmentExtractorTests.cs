@@ -109,6 +109,24 @@ public sealed class MoodleAssignmentExtractorTests
     }
 
     [Theory]
+    [InlineData("Submission status", "Submitted for grading", MoodleAssignmentStatus.Submitted)]
+    [InlineData("حالة التسليم", "تم التسليم", MoodleAssignmentStatus.Submitted)]
+    [InlineData("Submission status Submitted late", "", MoodleAssignmentStatus.SubmittedLate)]
+    public void Reads_submission_state_from_visible_page_text_when_theme_does_not_expose_table_rows(
+        string statusLine, string nextLine, MoodleAssignmentStatus expected)
+    {
+        var lines = string.IsNullOrEmpty(nextLine) ? new List<string> { statusLine } : new List<string> { statusLine, nextLine };
+        var result = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot
+        {
+            Title = "Assignment",
+            BodyLines = lines
+        }, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=81234", "الحوسبة المنتشرة - عملي");
+
+        Assert.NotNull(result);
+        Assert.Equal(expected, result.Status);
+    }
+
+    [Theory]
     [InlineData("25 November 2026, 11:59 PM", "Asia/Gaza", 2)]
     [InlineData("٢٥ نوفمبر ٢٠٢٦، ١١:٥٩ م", "Asia/Gaza", 2)]
     [InlineData("25 November 2026, 11:59 PM", "UTC", 0)]

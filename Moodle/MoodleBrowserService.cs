@@ -600,11 +600,13 @@ public sealed class MoodleBrowserService(
           const text = e => (e?.innerText || e?.textContent || '').replace(/\s+/g, ' ').trim();
           const title = text(document.querySelector('h1')) || text(document.querySelector('[data-region="activity-header"] h1'));
           const body = text(document.body);
+          const bodyLines = (document.body?.innerText || '').split(/\r?\n/).flatMap(line => line.split('\t')).map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
           const timeValues = [...document.querySelectorAll('time[datetime], time[data-timestamp]')].map(e => ({ label: text(e.parentElement?.parentElement || e.parentElement), value: e.getAttribute('datetime') || e.getAttribute('data-timestamp') }));
-          const rowElements = [...new Set(document.querySelectorAll('.submissionstatustable tr, .generaltable tr, [data-region="assign-info"] tr, #page-mod-assign-view tr'))];
+          // Moodle themes/plugins may omit the standard table classes; include all semantic table rows.
+          const rowElements = [...new Set(document.querySelectorAll('tr, [role="row"]'))];
           const rows = rowElements.map(r => {
-            const cells = [...r.querySelectorAll(':scope > th, :scope > td')];
-            const labelCell = cells.find(c => c.tagName === 'TH') || cells[0];
+            const cells = [...r.querySelectorAll(':scope > th, :scope > td, :scope > [role="rowheader"], :scope > [role="cell"]')];
+            const labelCell = cells.find(c => c.tagName === 'TH' || c.getAttribute('role') === 'rowheader') || cells[0];
             const valueCells = cells.filter(c => c !== labelCell);
             const label = text(labelCell) || text(r.querySelector('.col-1, dt'));
             const value = valueCells.map(text).filter(Boolean).join(' ') || text(r.querySelector('.col-2, dd'));
@@ -649,10 +651,19 @@ public sealed class MoodleBrowserService(
             if (cutoff) rows.push({ label: 'Cut-off date', value: '', iso: cutoff });
           }
           const description = text(document.querySelector('.activity-description, [data-region="activity-description"], #intro'));
-          return JSON.stringify({ title, body, description, timeValues, rows });
+          return JSON.stringify({ title, body, bodyLines, description, timeValues, rows });
         }
         """);
         var data = MoodleAssignmentExtractor.ParsePageSnapshot(dataJson);
+        logger.LogInformation("Moodle assignment page snapshot contains {RowCount} table rows and {BodyLineCount} text lines; submission status label detected {SubmissionStatusDetected}.",
+            data.Rows.Count, data.BodyLines.Count, data.Rows.Any(row => row.Label.Contains("submission status", StringComparison.OrdinalIgnoreCase)
+                || row.Label.Contains("حالة التسليم", StringComparison.OrdinalIgnoreCase)
+                || row.Label.Contains("حالة الإرسال", StringComparison.OrdinalIgnoreCase)
+                || row.Label.Contains("حالة التقديم", StringComparison.OrdinalIgnoreCase)
+                || data.BodyLines.Any(line => line.Contains("submission status", StringComparison.OrdinalIgnoreCase)
+                    || line.Contains("حالة التسليم", StringComparison.OrdinalIgnoreCase)
+                    || line.Contains("حالة الإرسال", StringComparison.OrdinalIgnoreCase)
+                    || line.Contains("حالة التقديم", StringComparison.OrdinalIgnoreCase))));
         return MoodleAssignmentExtractor.ParseAssignmentPage(data, SafeAssignmentUrl(page.Url), courseName, options.Value.TimeZoneId);
     }
 

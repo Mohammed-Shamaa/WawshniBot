@@ -42,6 +42,7 @@ public sealed class MoodleAssignmentPageSnapshot
 {
     public string Title { get; set; } = "";
     public string Body { get; set; } = "";
+    public List<string> BodyLines { get; set; } = [];
     public string Description { get; set; } = "";
     public List<MoodleAssignmentPageTime> TimeValues { get; set; } = [];
     public List<MoodleAssignmentPageRow> Rows { get; set; } = [];
@@ -96,7 +97,8 @@ public static class MoodleAssignmentExtractor
         // describes the cut-off and must never be substituted for the normal Due date.
         var dueRow = FindRow(snapshot.Rows, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
         var dueTime = FindTime(snapshot.TimeValues, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
-        var dueText = dueRow?.Value ?? dueTime?.Label;
+        var dueBody = FindBodyValue(snapshot.BodyLines, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
+        var dueText = dueRow?.Value ?? dueTime?.Label ?? dueBody;
         var dueIso = dueRow?.Iso ?? dueTime?.Value;
         var (dueAt, dueKnowledge) = ParseDueDate(dueText, dueIso, timeZoneId);
         if (dueKnowledge == MoodleDateKnowledge.Unknown && (dueRow is not null || dueTime is not null))
@@ -111,10 +113,13 @@ public static class MoodleAssignmentExtractor
 
         var submissionRow = FindRow(snapshot.Rows, "submission status", "حالة التسليم", "حالة الإرسال", "حالة التقديم");
         var remainingRow = FindRow(snapshot.Rows, "time remaining", "الوقت المتبقي", "الوقت المتبقي للتسليم");
-        var statusText = string.Join(" ", new[] { submissionRow?.Value, remainingRow?.Value }.Where(value => !string.IsNullOrWhiteSpace(value)));
+        var submissionText = submissionRow?.Value ?? FindBodyValue(snapshot.BodyLines, "submission status", "حالة التسليم", "حالة الإرسال", "حالة التقديم");
+        var remainingText = remainingRow?.Value ?? FindBodyValue(snapshot.BodyLines, "time remaining", "الوقت المتبقي", "الوقت المتبقي للتسليم");
+        var statusText = string.Join(" ", new[] { submissionText, remainingText }.Where(value => !string.IsNullOrWhiteSpace(value)));
         var status = MapStatus(statusText);
         var gradingRow = FindRow(snapshot.Rows, "grading status", "حالة التقييم", "حالة التصحيح");
-        var gradingStatus = MapGradingStatus(gradingRow?.Value);
+        var gradingText = gradingRow?.Value ?? FindBodyValue(snapshot.BodyLines, "grading status", "حالة التقييم", "حالة التصحيح");
+        var gradingStatus = MapGradingStatus(gradingText);
         if (status == MoodleAssignmentStatus.Unavailable && gradingStatus == MoodleGradingStatus.NeedsChanges)
             status = MoodleAssignmentStatus.NeedsRevision;
         var acceptanceText = string.Join(" ", new[] { remainingRow?.Value, snapshot.Body }.Where(value => !string.IsNullOrWhiteSpace(value)));
@@ -148,6 +153,32 @@ public static class MoodleAssignmentExtractor
 
     private static MoodleAssignmentPageTime? FindTime(IEnumerable<MoodleAssignmentPageTime> values, params string[] labels) =>
         values.FirstOrDefault(value => labels.Any(label => LabelMatches(value.Label, label)));
+
+    private static string? FindBodyValue(IReadOnlyList<string> lines, params string[] labels)
+    {
+        for (var index = 0; index < lines.Count; index++)
+        {
+            var line = Normalize(lines[index]);
+            foreach (var label in labels.OrderByDescending(value => value.Length))
+            {
+                var target = Normalize(label);
+                if (line.Equals(target, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (index + 1 < lines.Count && !IsKnownFieldLabel(lines[index + 1])) return lines[index + 1].Trim();
+                    continue;
+                }
+
+                if (line.StartsWith(target + ":", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith(target + " ", StringComparison.OrdinalIgnoreCase))
+                    return lines[index][label.Length..].Trim().TrimStart(':', '：', '-', '–').Trim();
+            }
+        }
+        return null;
+    }
+
+    private static bool IsKnownFieldLabel(string value) =>
+        new[] { "submission status", "grading status", "time remaining", "last modified", "حالة التسليم", "حالة الإرسال", "حالة التقديم", "حالة التقييم", "حالة التصحيح", "الوقت المتبقي", "آخر تعديل" }
+            .Any(label => Normalize(value).Equals(Normalize(label), StringComparison.OrdinalIgnoreCase));
 
     private static bool LabelMatches(string? actual, string expected)
     {
