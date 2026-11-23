@@ -592,6 +592,7 @@ public sealed class MoodleBrowserService(
         logger.LogInformation("Moodle assignment details page loaded; HTTP status {StatusCode}.", response?.Status.ToString() ?? "unavailable");
         if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase) || response?.Status is >= 400) return null;
         try { await page.Locator("#page-mod-assign-view, [data-region='assignment-info'], .activity-header, .submissionstatustable, .activity-dates").First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 5_000 }); }
+        catch (TimeoutException) { /* Still inspect the page snapshot; Moodle may use a delayed or different theme layout. */ }
         catch (PlaywrightException) { /* Still inspect the page snapshot; course details may use another theme layout. */ }
         await page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 4_000 }).ContinueOnTimeout();
 
@@ -836,12 +837,14 @@ internal static class PlaywrightTaskExtensions
     public static async Task ContinueOnTimeout(this Task task)
     {
         try { await task; }
+        catch (TimeoutException) { }
         catch (PlaywrightException) { }
     }
 
     public static async Task<string?> ContinueWithOnTimeout(this Task<string?> task)
     {
         try { return await task; }
+        catch (TimeoutException) { return null; }
         catch (PlaywrightException) { return null; }
     }
 }

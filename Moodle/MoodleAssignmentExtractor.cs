@@ -71,10 +71,10 @@ public static class MoodleAssignmentExtractor
         if (Has(value, "needs revision", "needs changes", "requires changes", "يحتاج إلى تعديل", "يحتاج تعديل", "بحاجة إلى تعديل")) return MoodleAssignmentStatus.NeedsRevision;
         if (Has(value, "no online submissions required", "does not require you to submit anything online", "offline", "لا يتطلب تسليماً", "لا يتطلب تسليم")) return MoodleAssignmentStatus.NotRequired;
         if (Has(value, "draft (not submitted)", "draft", "مسودة", "لم يتم الإرسال")) return MoodleAssignmentStatus.Draft;
-        if (Has(value, "nothing submitted", "no submission", "no attempt", "not submitted", "لا يوجد تسليم", "لم يتم التسليم", "لم تسلم", "لم يتم تقديم")) return MoodleAssignmentStatus.NotSubmitted;
-        if (Has(value, "submitted", "تم التسليم", "تم الإرسال", "تم التقديم") && Has(value, "late", "متأخر", "متأخرا")) return MoodleAssignmentStatus.SubmittedLate;
+        if (Has(value, "nothing submitted", "no submission", "no attempt", "not submitted", "لا يوجد تسليم", "لا توجد تسليمات", "لم يتم التسليم", "لم يتم تسليم", "لم تسلم", "لم يتم تقديم")) return MoodleAssignmentStatus.NotSubmitted;
+        if (Has(value, "submitted", "تم التسليم", "تم تسليم", "تم الإرسال", "تم التقديم") && Has(value, "late", "متأخر", "متأخرا")) return MoodleAssignmentStatus.SubmittedLate;
         if (Has(value, "submitted late", "late submission", "تم التسليم متأخراً", "تم التسليم متأخرا", "تسليم متأخر", "بعد الموعد", "متأخر")) return MoodleAssignmentStatus.SubmittedLate;
-        if (Has(value, "submitted for grading", "submitted", "تم التسليم", "تم الإرسال")) return MoodleAssignmentStatus.Submitted;
+        if (Has(value, "submitted for grading", "submitted for marking", "submitted", "تم التسليم", "تم تسليم", "تم الإرسال", "تم التقديم")) return MoodleAssignmentStatus.Submitted;
         return MoodleAssignmentStatus.Unavailable;
     }
 
@@ -95,11 +95,16 @@ public static class MoodleAssignmentExtractor
 
         // In Moodle, Due date and Cut-off date are distinct. In Arabic, "آخر موعد للتسليم"
         // describes the cut-off and must never be substituted for the normal Due date.
-        var dueRow = FindRow(snapshot.Rows, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
+        var dueRows = FindRows(snapshot.Rows, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
+        var dueRow = dueRows.FirstOrDefault(row => ParseDueDate(row.Value, row.Iso, timeZoneId).Knowledge != MoodleDateKnowledge.Unknown)
+            ?? dueRows.FirstOrDefault();
         var dueTime = FindTime(snapshot.TimeValues, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
         var dueBody = FindBodyValue(snapshot.BodyLines, "due date", "due", "موعد التسليم", "تاريخ التسليم", "تاريخ الاستحقاق", "تاريخ الاستحقاق للتسليم");
-        var dueText = FirstNonBlank(dueRow?.Value, dueTime?.Label, dueBody);
-        var dueIso = dueRow?.Iso ?? dueTime?.Value;
+        var dueCandidate = new[] { (Text: dueRow?.Value, Iso: dueRow?.Iso), (Text: dueTime?.Label, Iso: dueTime?.Value), (Text: dueBody, Iso: (string?)null) }
+            .FirstOrDefault(candidate => !string.IsNullOrWhiteSpace(candidate.Text)
+                && ParseDueDate(candidate.Text, candidate.Iso, timeZoneId).Knowledge != MoodleDateKnowledge.Unknown);
+        var dueText = FirstNonBlank(dueCandidate.Text, dueRow?.Value, dueTime?.Label, dueBody);
+        var dueIso = dueCandidate.Iso ?? dueRow?.Iso ?? dueTime?.Value;
         var (dueAt, dueKnowledge) = ParseDueDate(dueText, dueIso, timeZoneId);
         if (dueKnowledge == MoodleDateKnowledge.Unknown && (dueRow is not null || dueTime is not null))
             dueKnowledge = MoodleDateKnowledge.ExtractionFailed;
@@ -111,16 +116,28 @@ public static class MoodleAssignmentExtractor
             "last modified", "submission date", "submitted on", "آخر تعديل", "وقت التسليم", "تاريخ ووقت التسليم");
         var submittedAt = ParseDate(FirstNonBlank(submittedRow?.Value, submittedTime?.Label), submittedRow?.Iso ?? submittedTime?.Value, timeZoneId);
 
-        var submissionRow = FindRow(snapshot.Rows, "submission status", "حالة التسليم", "حالة الإرسال", "حالة التقديم");
-        var remainingRow = FindRow(snapshot.Rows, "time remaining", "الوقت المتبقي", "الوقت المتبقي للتسليم");
-        var submissionText = FirstNonBlank(submissionRow?.Value,
-            FindBodyValue(snapshot.BodyLines, "submission status", "حالة التسليم", "حالة الإرسال", "حالة التقديم"));
+        var submissionRows = FindRows(snapshot.Rows, "submission status", "حالة التسليم", "حالة الإرسال", "حالة التقديم");
+        var submissionRow = submissionRows.FirstOrDefault(row => MapStatus(row.Value) != MoodleAssignmentStatus.Unavailable)
+            ?? submissionRows.FirstOrDefault();
+        var remainingRows = FindRows(snapshot.Rows, "time remaining", "الوقت المتبقي", "الوقت المتبقي للتسليم");
+        var remainingRow = remainingRows.FirstOrDefault(row => MapStatus(row.Value) != MoodleAssignmentStatus.Unavailable)
+            ?? remainingRows.FirstOrDefault();
+        var bodySubmissionText = FindBodyValue(snapshot.BodyLines, "submission status", "حالة التسليم", "حالة الإرسال", "حالة التقديم");
+        var submissionText = FirstNonBlank(
+            submissionRows.Select(row => row.Value).FirstOrDefault(value => MapStatus(value) != MoodleAssignmentStatus.Unavailable),
+            bodySubmissionText is not null && MapStatus(bodySubmissionText) != MoodleAssignmentStatus.Unavailable ? bodySubmissionText : null,
+            submissionRow?.Value,
+            bodySubmissionText);
         var remainingText = FirstNonBlank(remainingRow?.Value,
             FindBodyValue(snapshot.BodyLines, "time remaining", "الوقت المتبقي", "الوقت المتبقي للتسليم"));
         var statusText = string.Join(" ", new[] { submissionText, remainingText }.Where(value => !string.IsNullOrWhiteSpace(value)));
         var status = MapStatus(statusText);
-        var gradingRow = FindRow(snapshot.Rows, "grading status", "حالة التقييم", "حالة التصحيح");
-        var gradingText = FirstNonBlank(gradingRow?.Value,
+        var gradingRows = FindRows(snapshot.Rows, "grading status", "حالة التقييم", "حالة التصحيح");
+        var gradingRow = gradingRows.FirstOrDefault(row => MapGradingStatus(row.Value) != MoodleGradingStatus.Unavailable)
+            ?? gradingRows.FirstOrDefault();
+        var gradingText = FirstNonBlank(
+            gradingRows.Select(row => row.Value).FirstOrDefault(value => MapGradingStatus(value) != MoodleGradingStatus.Unavailable),
+            gradingRow?.Value,
             FindBodyValue(snapshot.BodyLines, "grading status", "حالة التقييم", "حالة التصحيح"));
         var gradingStatus = MapGradingStatus(gradingText);
         if (status == MoodleAssignmentStatus.Unavailable && gradingStatus == MoodleGradingStatus.NeedsChanges)
@@ -152,7 +169,10 @@ public static class MoodleAssignmentExtractor
     }
 
     private static MoodleAssignmentPageRow? FindRow(IEnumerable<MoodleAssignmentPageRow> rows, params string[] labels) =>
-        rows.FirstOrDefault(row => labels.Any(label => LabelMatches(row.Label, label)));
+        FindRows(rows, labels).FirstOrDefault(row => !string.IsNullOrWhiteSpace(row.Value)) ?? FindRows(rows, labels).FirstOrDefault();
+
+    private static IEnumerable<MoodleAssignmentPageRow> FindRows(IEnumerable<MoodleAssignmentPageRow> rows, params string[] labels) =>
+        rows.Where(row => labels.Any(label => LabelMatches(row.Label, label)));
 
     private static MoodleAssignmentPageTime? FindTime(IEnumerable<MoodleAssignmentPageTime> values, params string[] labels) =>
         values.FirstOrDefault(value => labels.Any(label => LabelMatches(value.Label, label)));
@@ -179,8 +199,9 @@ public static class MoodleAssignmentExtractor
         return null;
     }
 
-    private static string? FirstNonBlank(params string?[] values) =>
-        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
+    private static string? FirstNonBlank(params string?[] values) => values
+        .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)
+            && value.Trim() is not ("-" or "–" or "—" or "N/A" or "غير متاح" or "غير متاحة"))?.Trim();
 
     private static bool IsKnownFieldLabel(string value) =>
         new[] { "submission status", "grading status", "time remaining", "last modified", "حالة التسليم", "حالة الإرسال", "حالة التقديم", "حالة التقييم", "حالة التصحيح", "الوقت المتبقي", "آخر تعديل" }

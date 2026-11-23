@@ -152,6 +152,26 @@ public sealed class MoodleAssignmentExtractorTests
         Assert.Equal(MoodleAssignmentStatus.Submitted, result.Status);
     }
 
+    [Fact]
+    public void Prefers_recognized_values_when_the_dom_contains_duplicate_assignment_rows()
+    {
+        var result = MoodleAssignmentExtractor.ParseAssignmentPage(new MoodleAssignmentPageSnapshot
+        {
+            Title = "Assignment",
+            Rows =
+            [
+                new() { Label = "Due", Value = "-" },
+                new() { Label = "Due date", Value = "Tuesday, 1 December 2026, 11:59 PM", Iso = "2026-12-01T21:59:00Z" },
+                new() { Label = "Submission status", Value = "-" },
+                new() { Label = "Submission status", Value = "Submitted for grading" }
+            ]
+        }, "https://moodle.iugaza.edu.ps/mod/assign/view.php?id=81236", "نظم التشغيل - عملي");
+
+        Assert.NotNull(result);
+        Assert.Equal(DateTimeOffset.Parse("2026-12-01T21:59:00Z"), result.DueAt);
+        Assert.Equal(MoodleAssignmentStatus.Submitted, result.Status);
+    }
+
     [Theory]
     [InlineData("25 November 2026, 11:59 PM", "Asia/Gaza", 2)]
     [InlineData("٢٥ نوفمبر ٢٠٢٦، ١١:٥٩ م", "Asia/Gaza", 2)]
@@ -181,6 +201,8 @@ public sealed class MoodleAssignmentExtractorTests
     [InlineData("Graded", MoodleAssignmentStatus.Graded)]
     [InlineData("Not graded", MoodleAssignmentStatus.Unavailable)]
     [InlineData("لم يتم التقييم", MoodleAssignmentStatus.Unavailable)]
+    [InlineData("لم يتم تسليم", MoodleAssignmentStatus.NotSubmitted)]
+    [InlineData("تم تسليم الواجب", MoodleAssignmentStatus.Submitted)]
     [InlineData("يحتاج إلى تعديل", MoodleAssignmentStatus.NeedsRevision)]
     [InlineData("غير معروف", MoodleAssignmentStatus.Unavailable)]
     public void Status_mapping_requires_actual_text(string text, MoodleAssignmentStatus expected) => Assert.Equal(expected, MoodleAssignmentExtractor.MapStatus(text));
