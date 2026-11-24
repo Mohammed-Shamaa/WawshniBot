@@ -42,8 +42,8 @@ public sealed class GeminiChatService(
         var fallbackModel = settings.FallbackModel?.Trim();
         if (string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(model))
         {
-            logger.LogWarning("GoogleAI is enabled but its API key or model is not configured.");
-            return new(GeminiReplyKind.NotConfigured, "المساعد الذكي غير جاهز حالياً. يرجى إبلاغ مسؤول البوت.");
+            logger.LogWarning("Google AI chat is enabled but its API key or model is not configured.");
+            return new(GeminiReplyKind.NotConfigured, "المساعد مش جاهز حالياً 😅 خلّي مسؤول البوت يراجع الإعدادات.");
         }
         userText = userText.Trim();
         if (userText.Length > MaxMessageCharacters)
@@ -94,13 +94,13 @@ public sealed class GeminiChatService(
                     (int)response.StatusCode, googleStatus, selectedModel);
                 var message = response.StatusCode switch
                 {
-                    HttpStatusCode.TooManyRequests => "Gemini أخذ استراحة قصيرة بسبب حد الاستخدام 😅 جرّب بعد شوي.",
-                    HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => "إعداد مفتاح Gemini يحتاج مراجعة من مسؤول البوت. جرّب لاحقاً.",
-                    HttpStatusCode.NotFound => "اسم موديل Gemini غير متاح حالياً؛ أبلغ مسؤول البوت.",
+                    HttpStatusCode.TooManyRequests => "واضح إني احتجت استراحة صغيرة 😅 جرّب تحكي معي بعد شوي.",
+                    HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => "مش قادر أرد هالمرة 😅 خلّي مسؤول البوت يراجع الإعدادات.",
+                    HttpStatusCode.NotFound => "مش قادر أوصل للمساعد حالياً 😅 جرّب بعد شوي، وإذا استمرت المشكلة خبر مسؤول البوت.",
                     _ => "المساعد أخذ استراحة غير مخططة 😅 جرّب تحكي معي كمان شوي."
                 };
-                if (googleStatus == "INVALID_API_KEY") message = "مفتاح Gemini غير صالح أو غير مفعّل. أبلغ مسؤول البوت ليراجع إعداداته.";
-                else if (googleStatus == "MODEL_NOT_FOUND") message = "اسم موديل Gemini غير متاح. أبلغ مسؤول البوت ليراجع إعداد الموديل.";
+                if (googleStatus == "INVALID_API_KEY") message = "المساعد مش قادر يرد حالياً 😅 خلّي مسؤول البوت يراجع الإعدادات.";
+                else if (googleStatus == "MODEL_NOT_FOUND") message = "مش قادر أوصل للمساعد حالياً 😅 جرّب بعد شوي، وإذا استمرت المشكلة خبر مسؤول البوت.";
                 return new(GeminiReplyKind.Unavailable, message);
             }
 
