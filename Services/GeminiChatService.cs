@@ -18,7 +18,8 @@ public sealed class GeminiChatService(
     private const int MaxHistoryMessages = 12;
     private const int MaxMessageCharacters = 6000;
     private const int MaxRequestAttempts = 2;
-    private static readonly TimeSpan RequestAttemptTimeout = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan PrimaryRequestTimeout = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan FallbackRequestTimeout = TimeSpan.FromSeconds(25);
     private static readonly TimeSpan HistoryLifetime = TimeSpan.FromHours(2);
     private readonly ConcurrentDictionary<long, Conversation> _conversations = new();
 
@@ -64,13 +65,13 @@ public sealed class GeminiChatService(
             HttpResponseMessage response;
             try
             {
-                response = await SendWithRetryAsync(model, apiKey, payload, MaxRequestAttempts, cancellationToken);
+                response = await SendWithRetryAsync(model, apiKey, payload, MaxRequestAttempts, PrimaryRequestTimeout, cancellationToken);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && CanFallback(model, fallbackModel))
             {
                 selectedModel = fallbackModel!;
                 logger.LogWarning("Primary Gemini model {Model} timed out; trying configured fallback model {FallbackModel} once.", model, selectedModel);
-                response = await SendWithRetryAsync(selectedModel, apiKey, payload, 1, cancellationToken);
+                response = await SendWithRetryAsync(selectedModel, apiKey, payload, 1, FallbackRequestTimeout, cancellationToken);
             }
             if (response.StatusCode == HttpStatusCode.ServiceUnavailable
                 && selectedModel.Equals(model, StringComparison.OrdinalIgnoreCase)
@@ -79,7 +80,7 @@ public sealed class GeminiChatService(
                 response.Dispose();
                 selectedModel = fallbackModel!;
                 logger.LogWarning("Primary Gemini model {Model} remained unavailable after retry; trying configured fallback model {FallbackModel} once.", model, selectedModel);
-                response = await SendWithRetryAsync(selectedModel, apiKey, payload, 1, cancellationToken);
+                response = await SendWithRetryAsync(selectedModel, apiKey, payload, 1, FallbackRequestTimeout, cancellationToken);
             }
             using (response)
             {
@@ -157,7 +158,7 @@ public sealed class GeminiChatService(
             .Select(part => part.GetProperty("text").GetString() ?? "")).Trim();
     }
 
-    private async Task<HttpResponseMessage> SendWithRetryAsync(string model, string apiKey, GeminiRequest payload, int maxAttempts, CancellationToken cancellationToken)
+    private async Task<HttpResponseMessage> SendWithRetryAsync(string model, string apiKey, GeminiRequest payload, int maxAttempts, TimeSpan requestTimeout, CancellationToken cancellationToken)
     {
         var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{Uri.EscapeDataString(model)}:generateContent";
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
@@ -166,21 +167,15 @@ public sealed class GeminiChatService(
             request.Headers.TryAddWithoutValidation("x-goog-api-key", apiKey);
             request.Content = JsonContent.Create(payload);
             using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            attemptTimeout.CancelAfter(RequestAttemptTimeout);
+            attemptTimeout.CancelAfter(requestTimeout);
             HttpResponseMessage response;
             try
             {
                 response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attemptTimeout.Token);
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt < maxAttempts)
-            {
-                logger.LogWarning("Gemini request timed out on attempt {Attempt}/{MaxAttempts}; retrying once.", attempt, maxAttempts);
-                await Task.Delay(TimeSpan.FromMilliseconds(900), cancellationToken);
-                continue;
-            }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                logger.LogWarning("Gemini model {Model} timed out after {Attempt} attempt(s).", model, attempt);
+                logger.LogWarning("Gemini model {Model} timed out after {Attempt}/{MaxAttempts} attempt(s); timeout {TimeoutSeconds}s.", model, attempt, maxAttempts, requestTimeout.TotalSeconds);
                 throw;
             }
 

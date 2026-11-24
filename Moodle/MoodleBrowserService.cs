@@ -855,6 +855,17 @@ public sealed class MoodleBrowserService(
 
     private async Task<MoodleLinkResult> ReadCoursesOnPageAsync(IPage page, CancellationToken cancellationToken)
     {
+        var result = await ReadCoursesOnPageAttemptAsync(page, cancellationToken);
+        if (result.Kind is not (MoodleLinkResultKind.CoursesNotDetected or MoodleLinkResultKind.DashboardRedirect))
+            return result;
+
+        logger.LogWarning("Moodle returned a course page without detectable course elements; refreshing the page and retrying course extraction once.");
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+        return await ReadCoursesOnPageAttemptAsync(page, cancellationToken);
+    }
+
+    private async Task<MoodleLinkResult> ReadCoursesOnPageAttemptAsync(IPage page, CancellationToken cancellationToken)
+    {
         // A newly restored context starts at about:blank. Always derive the target from configured Moodle BaseUrl.
         var target = MoodleCoursePageUrl.FromBaseUrl(options.Value.BaseUrl);
         logger.LogInformation("Navigating Playwright to Moodle courses page {TargetUrl}.", SafeUrl(target.ToString()));
