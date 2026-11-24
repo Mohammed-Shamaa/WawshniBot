@@ -12,7 +12,16 @@ public sealed record TelegramUserRegistration(
     TelegramRegistrationStatus Status,
     DateTimeOffset StatusUpdatedAt,
     DateTimeOffset? DecisionAt,
-    long? DecisionBy);
+    long? DecisionBy)
+{
+    public bool IsBlocked { get; init; }
+    public DateTimeOffset? BlockedAt { get; init; }
+    public string? BlockReason { get; init; }
+    public string? BlockedBy { get; init; }
+    public DateTimeOffset? UnblockedAt { get; init; }
+    public string? UnblockedBy { get; init; }
+    public DateTimeOffset? LastActivityAt { get; init; }
+}
 
 public sealed record TelegramRegistrationResult(TelegramUserRegistration User, bool Created);
 
@@ -28,8 +37,8 @@ public static class TelegramRegistrationStatusExtensions
 
 public static class TelegramRegistrationPolicy
 {
-    public static bool CanAccessProtectedFeatures(TelegramRegistrationStatus? status, bool isAdministrator) =>
-        isAdministrator || status == TelegramRegistrationStatus.Approved;
+    public static bool CanAccessProtectedFeatures(TelegramRegistrationStatus? status, bool isAdministrator, bool isBlocked = false) =>
+        !isBlocked && (isAdministrator || status == TelegramRegistrationStatus.Approved);
 
     public static bool CanTransition(TelegramRegistrationStatus current, TelegramRegistrationStatus target) =>
         (current, target) is

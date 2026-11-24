@@ -49,10 +49,36 @@ The GitHub repository root is the project root. Create a Docker Web Service from
 - `GoogleAI__FallbackModel` = `gemini-3.5-flash` (used once if the primary model times out or returns HTTP 503)
 - `KeepAlive__Url=https://wawshnibot.onrender.com/health`
 - `KeepAlive__IntervalMinutes=10` (optional; clamped to 5–14 minutes)
+- `Dashboard__Username` = a private dashboard login name
+- `Dashboard__PasswordHash` = a PBKDF2-SHA256 password hash; never store the plain password in Render
 
 Render supplies `PORT`; the app binds to `0.0.0.0` on that port. Verify the deployment with `/health` (liveness) and `/health/ready` (database connection). The readiness response never includes a connection string or exception details.
 
 The optional self keep-alive requests the configured public `/health` URL every 10 minutes while the process is running. This may reduce idle spin-down on plans that allow it, but cannot wake an already stopped service or override Render's free-plan suspension policy, maintenance, or restarts; it does not guarantee 24/7 uptime. Render's filesystem is ephemeral; `.env.local` is for local development only. Persistent application data must be stored in the database.
+
+## Admin dashboard
+
+The authenticated dashboard is at `/admin`. It uses the existing `telegram_users` records and Moodle session associations, with a server-side cookie login. Set `Dashboard__Username` and `Dashboard__PasswordHash` in Render. The hash format is `pbkdf2-sha256$600000$<base64-salt>$<base64-hash>`. Generate it on a trusted PowerShell computer; the password is prompted securely and is not echoed:
+
+```powershell
+$securePassword = Read-Host 'Dashboard password' -AsSecureString
+$passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+try {
+    $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
+    $saltBytes = [byte[]]::new(16)
+    [Security.Cryptography.RandomNumberGenerator]::Fill($saltBytes)
+    $hashBytes = [Security.Cryptography.Rfc2898DeriveBytes]::Pbkdf2(
+        $plainPassword, $saltBytes, 600000, [Security.Cryptography.HashAlgorithmName]::SHA256, 32)
+    $salt = [Convert]::ToBase64String($saltBytes)
+    $hash = [Convert]::ToBase64String($hashBytes)
+    'pbkdf2-sha256${0}${1}${2}' -f 600000, $salt, $hash
+} finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
+    $plainPassword = $null
+}
+```
+
+Paste the generated line into `Dashboard__PasswordHash`. The dashboard includes overview statistics, search/filter/sort/pagination, dedicated registration and block-status views, user details, actions, audit history, and safe service status. Database schema changes are additive and applied at startup; `Users/002_admin_dashboard.sql` documents the same changes. Existing user records, registration status, and encrypted Moodle sessions are retained. Administrative status and block changes are transactional and audited; Telegram notification failure does not undo a saved change. Dashboard sign-in is rate-limited, uses HTTP-only Secure/SameSite cookies, and requires antiforgery tokens for mutations. No dashboard secret is sent to browser code.
 
 ## Telegram commands
 

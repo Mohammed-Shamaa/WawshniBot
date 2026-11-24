@@ -44,6 +44,13 @@ public sealed class MoodleSessionRepository(NeonDatabaseReadiness database)
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task EnsureSchemaAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await RequireDataSource().OpenConnectionAsync(cancellationToken);
+        await using var schema = new NpgsqlCommand(EnsureTableSql, connection);
+        await schema.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task<StoredMoodleSession?> GetAsync(long telegramUserId, CancellationToken cancellationToken)
     {
         var source = RequireDataSource();

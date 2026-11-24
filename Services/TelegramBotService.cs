@@ -12,6 +12,17 @@ public sealed class TelegramBotService : IUpdateHandler
     private TelegramBotClient? _client;
     private readonly MessageHandler _handler;
     private readonly ILogger<TelegramBotService> _logger;
+    private int _pollingActive;
+    private long _lastSuccessfulUpdateTicks;
+    public bool PollingActive => Volatile.Read(ref _pollingActive) == 1;
+    public DateTimeOffset? LastSuccessfulUpdate
+    {
+        get
+        {
+            var ticks = Interlocked.Read(ref _lastSuccessfulUpdateTicks);
+            return ticks == 0 ? null : new DateTimeOffset(ticks, TimeSpan.Zero);
+        }
+    }
     public TelegramBotService(IOptions<TelegramOptions> options, MessageHandler handler, ILogger<TelegramBotService> logger)
     { _options = options; _handler = handler; _logger = logger; }
     private readonly IOptions<TelegramOptions> _options;
@@ -26,7 +37,19 @@ public sealed class TelegramBotService : IUpdateHandler
         _client = new TelegramBotClient(token);
         var me = await _client.GetMe(cancellationToken);
         _logger.LogInformation("Starting long polling for @{BotUsername}.", me.Username);
-        await _client.ReceiveAsync(this, new ReceiverOptions { AllowedUpdates = [UpdateType.Message, UpdateType.CallbackQuery] }, cancellationToken);
+        Volatile.Write(ref _pollingActive, 1);
+        try { await _client.ReceiveAsync(this, new ReceiverOptions { AllowedUpdates = [UpdateType.Message, UpdateType.CallbackQuery] }, cancellationToken); }
+        finally { Volatile.Write(ref _pollingActive, 0); }
+    }
+    public async Task<bool> TrySendMessageAsync(long chatId, string text, CancellationToken cancellationToken)
+    {
+        if (_client is null) return false;
+        try { await _client.SendMessage(chatId, text, cancellationToken: cancellationToken); return true; }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _logger.LogWarning("Telegram notification delivery failed ({ExceptionType}).", exception.GetType().Name);
+            return false;
+        }
     }
     public async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
     {
@@ -48,6 +71,7 @@ public sealed class TelegramBotService : IUpdateHandler
                     replyMarkup: new InlineKeyboardMarkup(choices.Select(choice =>
                         new[] { InlineKeyboardButton.WithCallbackData(choice.Text, choice.CallbackData) })), cancellationToken: ct),
                 cancellationToken);
+            Interlocked.Exchange(ref _lastSuccessfulUpdateTicks, DateTimeOffset.UtcNow.Ticks);
             return;
         }
 
@@ -59,6 +83,7 @@ public sealed class TelegramBotService : IUpdateHandler
                 async (chatId, messageId, text, ct) => await botClient.EditMessageText(chatId, messageId, text,
                     replyMarkup: new InlineKeyboardMarkup(Array.Empty<InlineKeyboardButton[]>()), cancellationToken: ct),
                 cancellationToken);
+            Interlocked.Exchange(ref _lastSuccessfulUpdateTicks, DateTimeOffset.UtcNow.Ticks);
         }
     }
     public Task HandleErrorAsync(ITelegramBotClient botClient, Exception exception, HandleErrorSource source, CancellationToken cancellationToken)

@@ -15,8 +15,14 @@ public sealed class TelegramUserAuthorization(
         IsAdministrator(userId) ? TelegramRegistrationStatus.Approved
             : (await users.GetByTelegramIdAsync(userId, cancellationToken))?.Status;
 
-    public async Task<bool> IsApprovedAsync(long userId, CancellationToken cancellationToken) =>
-        TelegramRegistrationPolicy.CanAccessProtectedFeatures(await GetStatusAsync(userId, cancellationToken), IsAdministrator(userId));
+    public async Task<bool> IsApprovedAsync(long userId, CancellationToken cancellationToken)
+    {
+        var registration = await users.GetByTelegramIdAsync(userId, cancellationToken);
+        var status = IsAdministrator(userId) ? TelegramRegistrationStatus.Approved : registration?.Status;
+        return TelegramRegistrationPolicy.CanAccessProtectedFeatures(status, IsAdministrator(userId), registration?.IsBlocked ?? false);
+    }
+
+    public Task<bool> IsBlockedAsync(long userId, CancellationToken cancellationToken) => users.IsBlockedAsync(userId, cancellationToken);
 
     public async Task<bool> IsAdminAsync(long userId, CancellationToken cancellationToken)
     {

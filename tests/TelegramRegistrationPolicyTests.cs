@@ -16,6 +16,22 @@ public sealed class TelegramRegistrationPolicyTests
     [InlineData(TelegramRegistrationStatus.Approved, true)]
     [InlineData(TelegramRegistrationStatus.Pending, false)]
     [InlineData(TelegramRegistrationStatus.Rejected, false)]
+    public void BlockingDeniesAccessWithoutChangingRegistrationStatus(TelegramRegistrationStatus originalStatus, bool wasAllowed)
+    {
+        Assert.Equal(wasAllowed, TelegramRegistrationPolicy.CanAccessProtectedFeatures(originalStatus, isAdministrator: false));
+        Assert.False(TelegramRegistrationPolicy.CanAccessProtectedFeatures(originalStatus, isAdministrator: false, isBlocked: true));
+    }
+
+    [Fact]
+    public void BlockingOverridesAdministratorTelegramAccess()
+    {
+        Assert.False(TelegramRegistrationPolicy.CanAccessProtectedFeatures(TelegramRegistrationStatus.Approved, isAdministrator: true, isBlocked: true));
+    }
+
+    [Theory]
+    [InlineData(TelegramRegistrationStatus.Approved, true)]
+    [InlineData(TelegramRegistrationStatus.Pending, false)]
+    [InlineData(TelegramRegistrationStatus.Rejected, false)]
     public void ProtectedAccessDependsOnPersistedStatus(TelegramRegistrationStatus status, bool expected)
     {
         Assert.Equal(expected, TelegramRegistrationPolicy.CanAccessProtectedFeatures(status, isAdministrator: false));

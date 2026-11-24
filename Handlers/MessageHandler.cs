@@ -33,6 +33,15 @@ public sealed class MessageHandler(
     {
         if (message.From is null || message.Chat is null) return;
         var userId = message.From.Id;
+        if (await authorization.IsBlockedAsync(userId, cancellationToken))
+        {
+            if (message.Chat.Type == ChatType.Private)
+                await SafeReply(message.Chat.Id, "تم تعليق إمكانية استخدامك للبوت. تواصل مع مسؤول وشوشني إذا كنت تعتقد أن هذا خطأ.", reply, cancellationToken);
+            return;
+        }
+        try { await users.RecordActivityAsync(userId, cancellationToken); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        { logger.LogDebug("Could not update dashboard last-activity time ({ExceptionType}).", exception.GetType().Name); }
         var isAdmin = await authorization.IsAdminAsync(userId, cancellationToken);
         if (string.IsNullOrWhiteSpace(message.Text))
         {
@@ -84,7 +93,7 @@ public sealed class MessageHandler(
                     }
                     return;
                 case TelegramRegistrationStatus.Approved:
-                    await SafeReply(message.Chat.Id, "أهلاً بك في WawshniBot. أرسل /link لربط حساب Moodle، أو /help لعرض الأوامر.", reply, cancellationToken);
+                    await SafeReply(message.Chat.Id, "أهلاً بك في وشوشني. أرسل /link لربط حساب Moodle، أو /help لعرض الأوامر.", reply, cancellationToken);
                     return;
                 case TelegramRegistrationStatus.Rejected:
                     await SafeReply(message.Chat.Id, "نعتذر، لم تتم الموافقة على طلب انضمامك إلى وشوشني. إذا كنت تعتقد أن هذا القرار صدر بالخطأ، يرجى التواصل مع مسؤول البوت.", reply, cancellationToken);
@@ -279,7 +288,7 @@ public sealed class MessageHandler(
                 response = "تم مسح سياق المحادثة مع المساعد الذكي.";
                 break;
             case "/start":
-                response = "أهلاً بك في WawshniBot. أرسل /link لربط حساب Moodle، أو /help لعرض الأوامر.";
+                response = "أهلاً بك في وشوشني. أرسل /link لربط حساب Moodle، أو /help لعرض الأوامر.";
                 break;
             case "/help":
                 response = "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n\nاكتب سؤالك مباشرة للمساعد. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل إلى Google Gemini.";
@@ -325,6 +334,17 @@ public sealed class MessageHandler(
                 answered = true;
                 return;
             }
+            if (await authorization.IsBlockedAsync(callback.From.Id, cancellationToken))
+            {
+                if (callback.Message?.Chat.Type == ChatType.Private)
+                    await reply(callback.Message.Chat.Id, "تم تعليق إمكانية استخدامك للبوت. تواصل مع مسؤول وشوشني إذا كنت تعتقد أن هذا خطأ.", cancellationToken);
+                await answer(callback.Id, "تم تعليق إمكانية استخدامك للبوت.", cancellationToken);
+                answered = true;
+                return;
+            }
+            try { await users.RecordActivityAsync(callback.From.Id, cancellationToken); }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            { logger.LogDebug("Could not update dashboard last-activity time ({ExceptionType}).", exception.GetType().Name); }
             if (callback.Message is null || callback.Data is null)
             {
                 await answer(callback.Id, "تعذر قراءة طلب المراجعة.", cancellationToken);
@@ -394,7 +414,7 @@ public sealed class MessageHandler(
         switch (command)
         {
             case "/start":
-                await SafeReply(chatId, "أهلاً بك في WawshniBot.\n/help لعرض الأوامر\n/pending_users لطلبات الانضمام\n/users لإحصاءات المستخدمين\n/approve <id> أو /reject <id> أو /revoke <id> لإدارة الصلاحيات.", reply, cancellationToken);
+                await SafeReply(chatId, "أهلاً بك في وشوشني.\n/help لعرض الأوامر\n/pending_users لطلبات الانضمام\n/users لإحصاءات المستخدمين\n/approve <id> أو /reject <id> أو /revoke <id> لإدارة الصلاحيات.", reply, cancellationToken);
                 return true;
             case "/help":
                 await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — اختيار مساق لعرض الواجبات\n/my_exams — اختيار مساق لعرض الاختبارات\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول أو إعادة قبول\n/reject <telegram_user_id> — رفض أو إلغاء اعتماد\n/revoke <telegram_user_id> — سحب اعتماد مستخدم\n\nاكتب سؤالك مباشرة للمساعد. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل إلى Google Gemini. ", reply, cancellationToken);
