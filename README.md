@@ -43,6 +43,9 @@ The GitHub repository root is the project root. Create a Docker Web Service from
 - `Moodle__TimeZoneId=Asia/Gaza` (default; set this to the timezone configured for the Moodle account if it differs)
 - `Moodle__SessionEncryptionKey` = Base64 encoding of 32 random bytes, generated for example with `openssl rand -base64 32`; `Moodle__SessionEncryptionKeyVersion=1`. Store keys only in Render and back them up securely. For rotation, increment the version and retain old values as `Moodle__PreviousSessionEncryptionKeys__1` until old session rows are removed or re-encrypted.
 - `Moodle__ScanIntervalMinutes=10`
+- `GoogleAI__Enabled=true` to enable natural Arabic/English chat
+- `GoogleAI__ApiKey` = API key from Google AI Studio (store only in Render; never commit it)
+- `GoogleAI__GeminiModel=gemini-3.8-flash`
 - `KeepAlive__Url=https://wawshnibot.onrender.com/health`
 - `KeepAlive__IntervalMinutes=10` (optional; clamped to 5–14 minutes)
 
@@ -69,6 +72,10 @@ Administrator commands (only the configured Telegram ID can run these):
 Revocation changes status to `Rejected`; the encrypted Moodle session is retained and becomes unusable while the user is unapproved. An administrator can later re-approve the same registration. Inline callbacks validate the actual Telegram sender ID and update only a still-Pending request.
 
 Moodle commands: `/link` (also `/connect_moodle`) starts an Arabic student ID/password flow; `/status` checks the saved session against Moodle; `/my_courses` returns course names read from the authenticated Moodle page; `/my_assignments` offers a course picker and retrieves assignments for one course; `/my_exams` offers a course picker and retrieves quizzes/exams for one course; `/all_exams` retrieves quizzes/exams across enrolled courses; `/logout` deletes only that Telegram user's session; `/cancel` cancels that user's current linking flow. Each session is stored under its owner's Telegram numeric ID and each linking flow/browser operation is isolated by that ID.
+
+## Gemini assistant
+
+When `GoogleAI__Enabled=true` and `GoogleAI__ApiKey` are configured, approved users can ask questions in Arabic or English directly in chat. The bot sends user messages and a bounded recent conversation context to Google's Gemini API; it does not include saved Moodle cookies or database records. Do not send passwords, API keys, or other sensitive information. Moodle account data must be requested through the explicit Moodle commands, which perform authenticated retrieval separately. `/reset_chat` clears the current user's in-memory conversation context; context expires after two hours and is lost when the process restarts. Configure `GoogleAI__GeminiModel` to select the model (default example: `gemini-3.8-flash`).
 
 The password message is immediately passed to Telegram's delete API and the bot clears its local message and credential references as soon as the attempt finishes. If deletion fails, the bot asks for manual deletion. Telegram's delete API only removes a message from the chat and cannot guarantee removal from all Telegram systems or backups. The password is not stored in Postgres or browser storage. The saved Playwright storage state is AES-256-GCM encrypted; ciphertext, nonce, authentication tag, and key version are stored in Postgres. Chromium is launched only for link, status, or course commands and disposed after each operation.
 

@@ -4,6 +4,7 @@ using Telegram.Bot.Types.Enums;
 using Wawshni.Bot.Moodle;
 using Wawshni.Bot.Security;
 using Wawshni.Bot.Users;
+using Wawshni.Bot.Services;
 using Microsoft.Extensions.Options;
 using Telegram.Bot.Types.ReplyMarkups;
 
@@ -14,6 +15,7 @@ public sealed class MessageHandler(
     TelegramUserRepository users,
     IOptions<MoodleOptions> moodleOptions,
     MoodleBrowserService moodleBrowser,
+    GeminiChatService geminiChat,
     MoodleSessionRepository sessions,
     ILogger<MessageHandler> logger)
 {
@@ -99,7 +101,7 @@ public sealed class MessageHandler(
         if (command == "/help")
         {
             var help = registrationStatus == TelegramRegistrationStatus.Approved
-                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام"
+                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام\n\nلإجابة الأسئلة العادية، اكتب سؤالك مباشرة. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل رسائلك إلى خدمة Google Gemini لتوليد الرد."
                 : "يمكنك استخدام /my_access لمعرفة حالة طلبك. لإرسال طلب انضمام أو إعادة عرضه أرسل /start.";
             await SafeReply(message.Chat.Id, help, reply, cancellationToken);
             return;
@@ -272,11 +274,15 @@ public sealed class MessageHandler(
                 var allExams = await moodleBrowser.GetQuizzesAsync(userId, null, cancellationToken);
                 response = MoodleQuizMessageFormatter.Format(allExams, moodleOptions.Value.TimeZoneId);
                 break;
+            case "/reset_chat":
+                await geminiChat.ResetAsync(userId, cancellationToken);
+                response = "تم مسح سياق المحادثة مع المساعد الذكي.";
+                break;
             case "/start":
                 response = "أهلاً بك في WawshniBot. أرسل /link لربط حساب Moodle، أو /help لعرض الأوامر.";
                 break;
             case "/help":
-                response = "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية";
+                response = "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n\nاكتب سؤالك مباشرة للمساعد. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل إلى Google Gemini.";
                 break;
             case "/upcoming": response = "أرسل /link أولاً؛ استرجاع المواعيد غير متاح بعد."; break;
             case "/latest": response = "أرسل /link أولاً؛ لا توجد مزامنة للمستجدات بعد."; break;
@@ -286,7 +292,11 @@ public sealed class MessageHandler(
             case "/updates": response = "مزامنة مستجدات المساقات غير متاحة بعد."; break;
             case "/report": response = "التقارير ستتوفر في مرحلة لاحقة."; break;
             case var _ when messageText.StartsWith('/'): response = "لم أتعرف على هذا الأمر. أرسل /help."; break;
-            default: response = "وصلتني رسالتك. أرسل /help لعرض الأوامر المتاحة."; break;
+            default:
+                await SafeReply(message.Chat.Id, "⏳ جاري إعداد الرد...", reply, cancellationToken);
+                var geminiReply = await geminiChat.ReplyAsync(userId, messageText, cancellationToken);
+                response = geminiReply.Text;
+                break;
         }
         if (!await authorization.IsApprovedAsync(userId, cancellationToken))
         {
@@ -385,7 +395,7 @@ public sealed class MessageHandler(
                 await SafeReply(chatId, "أهلاً بك في WawshniBot.\n/help لعرض الأوامر\n/pending_users لطلبات الانضمام\n/users لإحصاءات المستخدمين\n/approve <id> أو /reject <id> أو /revoke <id> لإدارة الصلاحيات.", reply, cancellationToken);
                 return true;
             case "/help":
-                await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — اختيار مساق لعرض الواجبات\n/my_exams — اختيار مساق لعرض الاختبارات\n/all_exams — عرض اختبارات جميع المساقات\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول أو إعادة قبول\n/reject <telegram_user_id> — رفض أو إلغاء اعتماد\n/revoke <telegram_user_id> — سحب اعتماد مستخدم", reply, cancellationToken);
+                await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — اختيار مساق لعرض الواجبات\n/my_exams — اختيار مساق لعرض الاختبارات\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول أو إعادة قبول\n/reject <telegram_user_id> — رفض أو إلغاء اعتماد\n/revoke <telegram_user_id> — سحب اعتماد مستخدم\n\nاكتب سؤالك مباشرة للمساعد. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل إلى Google Gemini. ", reply, cancellationToken);
                 return true;
             case "/pending_users":
                 var pending = await users.GetPendingAsync(cancellationToken);

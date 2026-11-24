@@ -34,5 +34,8 @@
     <Compile Include="..\Handlers\MoodleAssignmentMessageFormatter.cs" Link="Handlers\MoodleAssignmentMessageFormatter.cs" />
     <Compile Include="..\Services\TelegramBotService.cs" Link="Services\TelegramBotService.cs" />
     <Compile Include="..\Moodle\MoodleAssignmentExtractor.cs" Link="Moodle\MoodleAssignmentExtractor.cs" />
+    <Compile Include="..\Moodle\MoodleQuizExtractor.cs" Link="Moodle\MoodleQuizExtractor.cs" />
+    <Compile Include="..\GoogleAiOptions.cs" Link="GoogleAiOptions.cs" />
+    <Compile Include="..\Services\GeminiChatService.cs" Link="Services\GeminiChatService.cs" />
   </ItemGroup>
 </Project>

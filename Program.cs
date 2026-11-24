@@ -18,6 +18,9 @@ builder.Services.AddOptions<MoodleOptions>()
     .Validate(options => options.LoginTimeoutSeconds is >= 15 and <= 120, "Moodle:LoginTimeoutSeconds must be between 15 and 120 seconds.")
     .Validate(options => options.ScanIntervalMinutes >= 1, "Moodle:ScanIntervalMinutes must be at least one minute.")
     .ValidateOnStart();
+builder.Services.AddOptions<GoogleAiOptions>()
+    .Bind(builder.Configuration.GetSection(GoogleAiOptions.SectionName));
+builder.Services.AddHttpClient<GeminiChatService>(client => client.Timeout = TimeSpan.FromSeconds(45));
 builder.Services.AddSingleton<TelegramUserAuthorization>();
 builder.Services.AddSingleton<TelegramUserRepository>();
 builder.Services.AddSingleton<MoodleConnectionStatus>();

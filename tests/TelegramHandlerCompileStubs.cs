@@ -18,6 +18,8 @@ public sealed class MoodleBrowserService
         Task.FromResult(new MoodleAssignmentCourseListResult(MoodleAssignmentsResultKind.Unavailable, []));
     public Task<MoodleAssignmentsResult> GetAssignmentsForCourseAsync(long userId, int courseId, CancellationToken cancellationToken) =>
         Task.FromResult(new MoodleAssignmentsResult(MoodleAssignmentsResultKind.Unavailable, []));
+    public Task<MoodleQuizResult> GetQuizzesAsync(long userId, int? courseId, CancellationToken cancellationToken) =>
+        Task.FromResult(new MoodleQuizResult(MoodleQuizResultKind.Unavailable, [], 0, 0, 0, 0, 0, 0));
 }
 
 public sealed class MoodleSessionRepository
