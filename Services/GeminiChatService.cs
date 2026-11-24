@@ -17,6 +17,8 @@ public sealed class GeminiChatService(
 {
     private const int MaxHistoryMessages = 12;
     private const int MaxMessageCharacters = 6000;
+    private const int MaxRequestAttempts = 2;
+    private static readonly TimeSpan RequestAttemptTimeout = TimeSpan.FromSeconds(18);
     private static readonly TimeSpan HistoryLifetime = TimeSpan.FromHours(2);
     private readonly ConcurrentDictionary<long, Conversation> _conversations = new();
 
@@ -55,12 +57,10 @@ public sealed class GeminiChatService(
                 .Append(new GeminiContent("user", [new GeminiPart(userText)]))
                 .ToArray();
             var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{Uri.EscapeDataString(model)}:generateContent";
-            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
-            request.Headers.TryAddWithoutValidation("x-goog-api-key", apiKey);
-            request.Content = JsonContent.Create(new GeminiRequest(
+            var payload = new GeminiRequest(
                 new GeminiInstruction([new GeminiPart(SystemInstruction)]), contents,
-                new GeminiGenerationConfig(1200)));
-            using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                new GeminiGenerationConfig(1200));
+            using var response = await SendWithRetryAsync(endpoint, apiKey, payload, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 var googleStatus = await ReadSafeGoogleStatusAsync(response, cancellationToken);
@@ -132,6 +132,39 @@ public sealed class GeminiChatService(
         return string.Join("", parts.EnumerateArray()
             .Where(part => part.TryGetProperty("text", out _))
             .Select(part => part.GetProperty("text").GetString() ?? "")).Trim();
+    }
+
+    private async Task<HttpResponseMessage> SendWithRetryAsync(string endpoint, string apiKey, GeminiRequest payload, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= MaxRequestAttempts; attempt++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            request.Headers.TryAddWithoutValidation("x-goog-api-key", apiKey);
+            request.Content = JsonContent.Create(payload);
+            using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            attemptTimeout.CancelAfter(RequestAttemptTimeout);
+            HttpResponseMessage response;
+            try
+            {
+                response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attemptTimeout.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt < MaxRequestAttempts)
+            {
+                logger.LogWarning("Gemini request timed out on attempt {Attempt}/{MaxAttempts}; retrying once.", attempt, MaxRequestAttempts);
+                await Task.Delay(TimeSpan.FromMilliseconds(900), cancellationToken);
+                continue;
+            }
+
+            if (response.StatusCode == HttpStatusCode.ServiceUnavailable && attempt < MaxRequestAttempts)
+            {
+                response.Dispose();
+                logger.LogWarning("Gemini returned HTTP 503 on attempt {Attempt}/{MaxAttempts}; retrying once after backoff.", attempt, MaxRequestAttempts);
+                await Task.Delay(TimeSpan.FromMilliseconds(900), cancellationToken);
+                continue;
+            }
+            return response;
+        }
+        throw new HttpRequestException("Gemini retry attempts were exhausted.");
     }
 
     private static async Task<string> ReadSafeGoogleStatusAsync(HttpResponseMessage response, CancellationToken cancellationToken)
