@@ -76,7 +76,7 @@ public sealed class GeminiChatService(
             if (ShouldUseFallback(response, selectedModel, model, fallbackModel))
             {
                 var failureStatusCode = response.StatusCode;
-                var googleStatus = failureStatusCode == HttpStatusCode.NotFound
+                var googleStatus = failureStatusCode is HttpStatusCode.NotFound or HttpStatusCode.TooManyRequests
                     ? await ReadSafeGoogleStatusAsync(response, cancellationToken)
                     : "UNAVAILABLE";
                 response.Dispose();
@@ -200,7 +200,9 @@ public sealed class GeminiChatService(
     private static bool ShouldUseFallback(HttpResponseMessage response, string selectedModel, string primaryModel, string? fallbackModel) =>
         selectedModel.Equals(primaryModel, StringComparison.OrdinalIgnoreCase)
         && CanFallback(primaryModel, fallbackModel)
-        && (response.StatusCode == HttpStatusCode.ServiceUnavailable || response.StatusCode == HttpStatusCode.NotFound);
+        && (response.StatusCode == HttpStatusCode.ServiceUnavailable
+            || response.StatusCode == HttpStatusCode.NotFound
+            || response.StatusCode == HttpStatusCode.TooManyRequests);
 
     private static async Task<string> ReadSafeGoogleStatusAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
