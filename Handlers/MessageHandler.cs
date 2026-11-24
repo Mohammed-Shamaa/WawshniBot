@@ -19,6 +19,7 @@ public sealed class MessageHandler(
 {
     private readonly ConcurrentDictionary<long, LinkFlow> _flows = new();
     private readonly ConcurrentDictionary<long, AssignmentCoursePicker> _assignmentCoursePickers = new();
+    private readonly ConcurrentDictionary<long, AssignmentCoursePicker> _examCoursePickers = new();
 
     public async Task HandleAsync(
         Message message,
@@ -98,7 +99,7 @@ public sealed class MessageHandler(
         if (command == "/help")
         {
             var help = registrationStatus == TelegramRegistrationStatus.Approved
-                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام"
+                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام"
                 : "يمكنك استخدام /my_access لمعرفة حالة طلبك. لإرسال طلب انضمام أو إعادة عرضه أرسل /start.";
             await SafeReply(message.Chat.Id, help, reply, cancellationToken);
             return;
@@ -118,6 +119,7 @@ public sealed class MessageHandler(
         {
             _flows.TryRemove(message.From.Id, out _);
             _assignmentCoursePickers.TryRemove(userId, out _);
+            _examCoursePickers.TryRemove(userId, out _);
             await SafeReply(message.Chat.Id, "تم إلغاء العملية الحالية.", reply, cancellationToken);
             return;
         }
@@ -242,17 +244,45 @@ public sealed class MessageHandler(
                     await SafeReply(message.Chat.Id, "تعذر عرض قائمة المساقات حالياً. حاول مرة أخرى.", reply, cancellationToken);
                 }
                 return;
+            case "/my_exams":
+                await SafeReply(message.Chat.Id, "⏳ جاري تحميل قائمة مساقاتك من Moodle...", reply, cancellationToken);
+                var examCourses = await moodleBrowser.GetAssignmentCoursesAsync(userId, cancellationToken);
+                if (examCourses.Kind is MoodleAssignmentsResultKind.Expired or MoodleAssignmentsResultKind.SessionRestoreFailed
+                    or MoodleAssignmentsResultKind.Unavailable or MoodleAssignmentsResultKind.ExtractionFailed)
+                { response = FormatAssignmentCourseListError(examCourses.Kind); break; }
+                if (examCourses.Courses.Count == 0) { response = "لم أجد مساقات مسجلة في حساب Moodle."; break; }
+                var examRequestId = Guid.NewGuid();
+                _examCoursePickers[userId] = new AssignmentCoursePicker(examRequestId,
+                    examCourses.Courses.ToDictionary(course => course.Id, course => course.Name), DateTimeOffset.UtcNow.AddMinutes(10));
+                var examPrompt = examCourses.Kind == MoodleAssignmentsResultKind.Partial
+                    ? "اختر مساقاً لعرض اختباراته. قد تكون قائمة المساقات غير مكتملة."
+                    : "اختر المساق الذي تريد عرض اختباراته وامتحاناته:";
+                var examChoices = examCourses.Courses.Select(course =>
+                    (Text: TruncateButtonLabel(course.Name), CallbackData: $"examcourse:{examRequestId:N}:{course.Id}")).ToArray();
+                try { await coursePicker(message.Chat.Id, examPrompt, examChoices, cancellationToken); }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    _examCoursePickers.TryRemove(userId, out _);
+                    logger.LogWarning("Could not send Moodle exam course picker ({ExceptionType}).", exception.GetType().Name);
+                    await SafeReply(message.Chat.Id, "تعذر عرض قائمة المساقات حالياً. حاول مرة أخرى.", reply, cancellationToken);
+                }
+                return;
+            case "/all_exams":
+                await SafeReply(message.Chat.Id, "⏳ جاري جلب الاختبارات من جميع مساقاتك في Moodle...", reply, cancellationToken);
+                var allExams = await moodleBrowser.GetQuizzesAsync(userId, null, cancellationToken);
+                response = MoodleQuizMessageFormatter.Format(allExams, moodleOptions.Value.TimeZoneId);
+                break;
             case "/start":
                 response = "أهلاً بك في WawshniBot. أرسل /link لربط حساب Moodle، أو /help لعرض الأوامر.";
                 break;
             case "/help":
-                response = "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية";
+                response = "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية";
                 break;
             case "/upcoming": response = "أرسل /link أولاً؛ استرجاع المواعيد غير متاح بعد."; break;
             case "/latest": response = "أرسل /link أولاً؛ لا توجد مزامنة للمستجدات بعد."; break;
             case "/scan": response = "المزامنة غير متاحة في هذه المرحلة."; break;
             case "/my_quizzes":
-            case "/quizzes": response = "استرجاع الاختبارات غير متاح بعد."; break;
+            case "/quizzes": response = "استخدم /my_exams لاختيار مساق أو /all_exams لعرض اختبارات جميع المساقات."; break;
             case "/updates": response = "مزامنة مستجدات المساقات غير متاحة بعد."; break;
             case "/report": response = "التقارير ستتوفر في مرحلة لاحقة."; break;
             case var _ when messageText.StartsWith('/'): response = "لم أتعرف على هذا الأمر. أرسل /help."; break;
@@ -292,6 +322,11 @@ public sealed class MessageHandler(
             if (callback.Data.StartsWith("course:", StringComparison.Ordinal))
             {
                 await HandleAssignmentCourseCallbackAsync(callback, reply, answer, edit, cancellationToken, () => answered = true);
+                return;
+            }
+            if (callback.Data.StartsWith("examcourse:", StringComparison.Ordinal))
+            {
+                await HandleExamCourseCallbackAsync(callback, reply, answer, edit, cancellationToken, () => answered = true);
                 return;
             }
             if (!await authorization.IsAdminAsync(callback.From.Id, cancellationToken))
@@ -477,6 +512,37 @@ public sealed class MessageHandler(
         }
         await SafeReply(callback.Message.Chat.Id,
             MoodleAssignmentMessageFormatter.Format(result, DateTimeOffset.UtcNow, moodleOptions.Value.TimeZoneId), reply, cancellationToken);
+    }
+
+    private async Task HandleExamCourseCallbackAsync(
+        CallbackQuery callback,
+        Func<long, string, CancellationToken, Task> reply,
+        Func<string, string, CancellationToken, Task> answer,
+        Func<long, int, string, CancellationToken, Task> edit,
+        CancellationToken cancellationToken,
+        Action markAnswered)
+    {
+        if (callback.Message!.Chat.Type != ChatType.Private || callback.Message.Chat.Id != callback.From!.Id)
+        { await answer(callback.Id, "افتح البوت في محادثة خاصة لاختيار المساق.", cancellationToken); markAnswered(); return; }
+        if (!await authorization.IsApprovedAsync(callback.From.Id, cancellationToken))
+        { await answer(callback.Id, "حسابك غير معتمد لاستخدام خدمات Moodle.", cancellationToken); markAnswered(); return; }
+        var parts = callback.Data!.Split(':', 3);
+        if (parts.Length != 3 || !Guid.TryParseExact(parts[1], "N", out var requestId) || !int.TryParse(parts[2], out var courseId))
+        { await answer(callback.Id, "اختيار المساق غير صالح.", cancellationToken); markAnswered(); return; }
+        if (!_examCoursePickers.TryGetValue(callback.From.Id, out var current) || current.RequestId != requestId
+            || current.ExpiresAt < DateTimeOffset.UtcNow || !current.Courses.TryGetValue(courseId, out var courseName))
+        { await answer(callback.Id, "انتهت صلاحية قائمة المساقات. أرسل /my_exams لعرضها من جديد.", cancellationToken); markAnswered(); return; }
+        if (!_examCoursePickers.TryRemove(callback.From.Id, out var consumed) || consumed.RequestId != requestId)
+        { if (consumed is not null) _examCoursePickers.TryAdd(callback.From.Id, consumed); await answer(callback.Id, "تم استخدام هذا الاختيار أو انتهت صلاحيته. أرسل /my_exams من جديد.", cancellationToken); markAnswered(); return; }
+        await answer(callback.Id, "جارٍ تحميل اختبارات المساق...", cancellationToken); markAnswered();
+        try { await edit(callback.Message.Chat.Id, callback.Message.MessageId, $"تم اختيار المساق: {courseName}", cancellationToken); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        { logger.LogDebug("Could not update the Moodle exam course picker ({ExceptionType}).", exception.GetType().Name); }
+        await SafeReply(callback.Message.Chat.Id, "⏳ جاري جلب اختبارات المساق من Moodle...", reply, cancellationToken);
+        var result = await moodleBrowser.GetQuizzesAsync(callback.From.Id, courseId, cancellationToken);
+        if (!await authorization.IsApprovedAsync(callback.From.Id, cancellationToken))
+        { await SafeReply(callback.Message.Chat.Id, "تم تغيير صلاحية حسابك أثناء تنفيذ الطلب؛ لم أرسل بيانات Moodle. تواصل مع مسؤول البوت.", reply, cancellationToken); return; }
+        await SafeReply(callback.Message.Chat.Id, MoodleQuizMessageFormatter.Format(result, moodleOptions.Value.TimeZoneId), reply, cancellationToken);
     }
 
     private static string TruncateButtonLabel(string value) => value.Length <= 60 ? value : value[..57] + "…";

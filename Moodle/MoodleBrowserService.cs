@@ -211,6 +211,125 @@ public sealed class MoodleBrowserService(
         finally { gate.Release(); }
     }
 
+    public async Task<MoodleQuizResult> GetQuizzesAsync(long telegramUserId, int? selectedCourseId, CancellationToken cancellationToken)
+    {
+        var gate = _userLocks.GetOrAdd(telegramUserId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
+            if (stored is null) return new(MoodleQuizResultKind.Expired, [], 0, 0, 0, 0, 0, 0);
+            return await WithStoredSessionAsync(stored, async page => await ReadQuizzesAsync(page, selectedCourseId, cancellationToken), cancellationToken);
+        }
+        catch (System.Security.Cryptography.CryptographicException exception)
+        {
+            logger.LogError("Saved Moodle session failed authenticated decryption during quiz retrieval ({ExceptionType}).", exception.GetType().Name);
+            return new(MoodleQuizResultKind.SessionRestoreFailed, [], 0, 0, 0, 0, 0, 0);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError("Moodle quiz retrieval failed ({ExceptionType}); safe message {SafeMessage}; stack trace {StackTrace}.",
+                exception.GetType().FullName, SafeExceptionMessage(exception), exception.StackTrace);
+            return new(MoodleQuizResultKind.Unavailable, [], 0, 0, 0, 0, 0, 0);
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task<MoodleQuizResult> ReadQuizzesAsync(IPage page, int? selectedCourseId, CancellationToken cancellationToken)
+    {
+        var courseResult = await ReadAssignmentCoursesOnPageAsync(page, cancellationToken);
+        if (courseResult.Kind == MoodleAssignmentsResultKind.Expired) return new(MoodleQuizResultKind.Expired, [], 0, 0, 0, 0, 0, 0);
+        if (courseResult.Kind is MoodleAssignmentsResultKind.Unavailable or MoodleAssignmentsResultKind.SessionRestoreFailed)
+            return new(MoodleQuizResultKind.Unavailable, [], 0, 0, 0, 0, 0, 0);
+        if (courseResult.Kind == MoodleAssignmentsResultKind.ExtractionFailed)
+            return new(MoodleQuizResultKind.ExtractionFailed, [], 0, 0, 0, 0, 0, 0);
+        var courses = selectedCourseId.HasValue ? courseResult.Courses.Where(c => c.Id == selectedCourseId.Value).ToArray() : courseResult.Courses.ToArray();
+        if (selectedCourseId.HasValue && courses.Length == 0) return new(MoodleQuizResultKind.ExtractionFailed, [], 0, 0, 0, 0, 0, 0);
+        var quizzes = new List<MoodleQuiz>();
+        var inspected = 0; var empty = 0; var failedCourses = 0; var inspectedPages = 0; var failedPages = 0;
+        foreach (var course in courses)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var courseUrl = new Uri(options.Value.BaseUrl, $"course/view.php?id={course.Id}");
+                var response = await page.GotoAsync(courseUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
+                if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase))
+                    return new(MoodleQuizResultKind.Expired, MoodleQuizExtractor.Deduplicate(quizzes), courses.Length, inspected, empty, failedCourses, inspectedPages, failedPages);
+                if (response?.Status is >= 400) { failedCourses++; continue; }
+                var links = await ReadVisibleQuizLinksAsync(page);
+                var indexUrl = new Uri(options.Value.BaseUrl, $"mod/quiz/index.php?id={course.Id}");
+                try
+                {
+                    var indexResponse = await page.GotoAsync(indexUrl.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 15_000 });
+                    if (IsUniversityHost(page.Url) && !page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase) && indexResponse?.Status < 400)
+                        links = links.Concat(await ReadVisibleQuizLinksAsync(page, false)).ToArray();
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                { logger.LogInformation("Moodle quiz index unavailable for course {CourseId} ({ExceptionType}); using course-page quiz links.", course.Id, exception.GetType().Name); }
+                links = links.GroupBy(link => link.Href, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
+                if (links.Length == 0)
+                {
+                    var body = await page.Locator("body").InnerTextAsync();
+                    if (body.Contains("no quizzes", StringComparison.OrdinalIgnoreCase) || body.Contains("لا توجد اختبارات", StringComparison.OrdinalIgnoreCase) || body.Contains("لا توجد امتحانات", StringComparison.OrdinalIgnoreCase)) { inspected++; empty++; }
+                    else failedCourses++;
+                    continue;
+                }
+                inspected++;
+                foreach (var link in links)
+                {
+                    try
+                    {
+                        var quiz = await ReadQuizDetailAsync(page, link, course.Name, cancellationToken);
+                        if (quiz is null) failedPages++; else { quizzes.Add(quiz); inspectedPages++; }
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    { failedPages++; logger.LogWarning("Moodle quiz detail failed for course {CourseId} ({ExceptionType}); safe message {SafeMessage}.", course.Id, exception.GetType().Name, SafeExceptionMessage(exception)); }
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            { failedCourses++; logger.LogWarning("Moodle quiz course scan failed for course {CourseId} ({ExceptionType}); safe message {SafeMessage}.", course.Id, exception.GetType().Name, SafeExceptionMessage(exception)); }
+        }
+        var distinct = MoodleQuizExtractor.Deduplicate(quizzes);
+        var partial = courseResult.Kind == MoodleAssignmentsResultKind.Partial || failedCourses > 0 || failedPages > 0;
+        logger.LogInformation("Moodle quiz retrieval complete: courses {CourseCount}, inspected {Inspected}, empty {Empty}, failed {Failed}; quiz details {Details}, failed {FailedDetails}, extracted {Extracted}.", courses.Length, inspected, empty, failedCourses, inspectedPages, failedPages, distinct.Count);
+        return new(partial ? MoodleQuizResultKind.Partial : MoodleQuizResultKind.Success, distinct, courses.Length, inspected, empty, failedCourses, inspectedPages, failedPages);
+    }
+
+    private async Task<AssignmentLink[]> ReadVisibleQuizLinksAsync(IPage page, bool waitForVisible = true)
+    {
+        var links = page.Locator("a[href*='/mod/quiz/view.php?id=']").Visible;
+        if (waitForVisible)
+        {
+            try { await links.First.WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 4_000 }); }
+            catch (Exception exception) when (exception is PlaywrightException or TimeoutException) { }
+        }
+        return await links.EvaluateAllAsync<AssignmentLink[]>("els => els.map(a => ({ href: a.href.split('#')[0], title: (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim() })).filter(x => x.href)");
+    }
+
+    private async Task<MoodleQuiz?> ReadQuizDetailAsync(IPage page, AssignmentLink link, string courseName, CancellationToken cancellationToken)
+    {
+        if (!Uri.TryCreate(link.Href, UriKind.Absolute, out var uri) || !IsUniversityHost(uri.ToString())) return null;
+        var response = await page.GotoAsync(uri.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
+        if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase) || response?.Status is >= 400) return null;
+        await page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 3_000 }).ContinueOnTimeout();
+        var json = await page.EvaluateAsync<string>("""
+        () => {
+          const text = e => (e?.innerText || e?.textContent || '').replace(/\s+/g, ' ').trim();
+          const body = document.body?.innerText || '';
+          const times = [...document.querySelectorAll('time[datetime], time[data-timestamp]')].map(e => ({label: text(e.parentElement?.parentElement || e.parentElement), value: e.getAttribute('datetime') || e.getAttribute('data-timestamp') || ''}));
+          return JSON.stringify({title: text(document.querySelector('h1')) || text(document.querySelector('[data-region="activity-header"] h1')) || text(document.querySelector('.page-header-headings h1')),
+            body, url: location.href, times});
+        }
+        """);
+        var snapshot = System.Text.Json.JsonSerializer.Deserialize<MoodleQuizPageSnapshot>(json,
+            new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (snapshot is null) return null;
+        if (string.IsNullOrWhiteSpace(snapshot.Title)) snapshot.Title = link.Title;
+        snapshot.Url = SafeAssignmentUrl(page.Url);
+        return MoodleQuizExtractor.Parse(snapshot, courseName, options.Value.TimeZoneId);
+    }
+
     public Task<MoodleAssignmentsResult> GetAssignmentsAsync(long telegramUserId, CancellationToken cancellationToken) =>
         GetAssignmentsCoreAsync(telegramUserId, null, cancellationToken);
 
