@@ -6,7 +6,8 @@ namespace Wawshni.Bot.Moodle;
 public enum MoodleQuizResultKind { Success, Partial, Expired, SessionRestoreFailed, Unavailable, ExtractionFailed }
 public sealed record MoodleQuiz(string Title, string Course, string Url, DateTimeOffset? OpensAt,
     DateTimeOffset? ClosesAt, string AttemptsAllowed, string TimeLimit, string Availability,
-    string AttemptStatus, string? StartedAt, string? CompletedAt, string? Duration, string? Grade);
+    string AttemptStatus, string? StartedAt, string? CompletedAt, string? Duration, string? Grade,
+    string ReviewStatus, string FurtherAttempts);
 public sealed record MoodleQuizResult(MoodleQuizResultKind Kind, IReadOnlyList<MoodleQuiz> Quizzes,
     int TotalCourses, int CoursesInspected, int CoursesWithoutQuizzes, int CoursesFailed,
     int QuizPagesInspected, int QuizPagesFailed);
@@ -25,8 +26,8 @@ public static class MoodleQuizExtractor
     {
         var title = Clean(page.Title);
         if (title.Length == 0) return null;
-        var opens = FindTime(page.Times, page.Body, timeZoneId, "open", "opened", "opens", "يبدأ", "يفتح", "مفتوح", "تاريخ البدء");
-        var closes = FindTime(page.Times, page.Body, timeZoneId, "close", "closed", "closes", "end", "يغلق", "مغلق", "ينتهي", "تاريخ الإغلاق");
+        var opens = FindTime(page.Times, page.Body, timeZoneId, "open", "opened", "opens", "يبدأ", "يفتح", "مفتوح", "مفتوحة", "تاريخ البدء");
+        var closes = FindTime(page.Times, page.Body, timeZoneId, "close", "closed", "closes", "end", "يغلق", "مغلق", "مغلقة", "ينتهي", "تاريخ الإغلاق");
         var attempts = FindValue(page.Body, "attempts allowed", "عدد المحاولات المسموح بها", "المحاولات المسموح بها", "المحاولات المسموح بها:");
         var limit = FindValue(page.Body, "time limit", "الحد الزمني", "المدة الزمنية");
         var availability = FindPhrase(page.Body,
@@ -34,14 +35,22 @@ public static class MoodleQuizExtractor
             "هذا الاختبار غير متاح حالياً", "هذا الاختبار غير متاح حاليا", "الاختبار غير متاح حالياً", "الاختبار متاح حالياً",
             "انتهى وقت الاختبار", "لم يعد بإمكانك محاولة هذا الاختبار");
         var attemptStatus = FindPhrase(page.Body, "Finished", "In progress", "Overdue", "Abandoned", "لم تبدأ", "قيد التنفيذ", "مكتملة", "مكتمل", "منتهية", "منتهي");
-        var started = FindLineValue(page.Body, "Started", "بدأت", "وقت البدء");
-        var completed = FindLineValue(page.Body, "Completed", "اكتملت", "وقت الإكمال", "وقت الانتهاء");
-        var duration = FindLineValue(page.Body, "Duration", "المدة");
+        if (attemptStatus == "غير متاح" && !ContainsAny(page.Body, "Your attempts", "ملخص موجز للاختبار", "ملخص المحاولة", "ملخص المحاولات"))
+            attemptStatus = "لم تظهر محاولة مسجلة";
+        var started = FindLineValue(page.Body, "Started", "بدأت", "بدأ", "وقت البدء");
+        var completed = FindLineValue(page.Body, "Completed", "اكتملت", "اكتمل", "وقت الإكمال", "وقت الانتهاء");
+        var duration = FindLineValue(page.Body, "Duration", "المدة", "الفترة");
         var grade = FindLineValue(page.Body, "Grade", "الدرجة", "العلامة")
             ?? Regex.Match(page.Body, @"(?i)(?:your final grade for this quiz is|درجتك النهائية في هذا الاختبار هي)\s*([^\r\n.]+)").Groups[1].Value.Trim();
         if (string.IsNullOrWhiteSpace(grade)) grade = null;
+        var review = FindPhrase(page.Body, "Review not permitted", "Review is not permitted", "المراجعة غير مسموح بها", "المراجعة غير مسموحة", "لا يسمح بمراجعة الاختبار");
+        var furtherAttempts = FindPhrase(page.Body, "No more attempts are allowed", "No more attempts allowed", "غير مسموح بأي محاولات أخرى", "لا توجد محاولات أخرى مسموحة", "لا يسمح بمحاولات أخرى");
+        if (availability == "غير متاح" && closes.HasValue && closes.Value < DateTimeOffset.UtcNow)
+            availability = "انتهى موعد الاختبار";
+        else if (availability == "غير متاح" && opens.HasValue && opens.Value > DateTimeOffset.UtcNow)
+            availability = "لم يبدأ بعد";
         var url = CanonicalUrl(page.Url);
-        return new(title, course, url, opens, closes, attempts, limit, availability, attemptStatus, started, completed, duration, grade);
+        return new(title, course, url, opens, closes, attempts, limit, availability, attemptStatus, started, completed, duration, grade, review, furtherAttempts);
     }
 
     public static IReadOnlyList<MoodleQuiz> Deduplicate(IEnumerable<MoodleQuiz> quizzes) => quizzes
@@ -75,19 +84,28 @@ public static class MoodleQuizExtractor
         date = default; return false;
     }
     private static string FindValue(string body, params string[] labels)
-    {
-        foreach (var line in body.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            if (labels.Any(label => Normalize(line).StartsWith(Normalize(label), StringComparison.Ordinal)))
-                return Regex.Replace(line[(line.IndexOf(':') >= 0 ? line.IndexOf(':') + 1 : 0)..].Trim(), @"\s+", " ");
-        return "غير متاح";
-    }
+        => FindLineValue(body, labels) ?? "غير متاح";
     private static string FindPhrase(string body, params string[] phrases) =>
         phrases.FirstOrDefault(p => Normalize(body).Contains(Normalize(p), StringComparison.Ordinal)) ?? "غير متاح";
+    private static bool ContainsAny(string body, params string[] phrases) =>
+        phrases.Any(p => Normalize(body).Contains(Normalize(p), StringComparison.Ordinal));
     private static string? FindLineValue(string body, params string[] labels)
     {
-        foreach (var line in body.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            if (labels.Any(label => Normalize(line).StartsWith(Normalize(label), StringComparison.Ordinal)))
-                return Regex.Replace(line[(line.IndexOf(':') >= 0 ? line.IndexOf(':') + 1 : 0)..].Trim(), @"\s+", " ");
+        var lines = body.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var i = 0; i < lines.Length; i++)
+        foreach (var label in labels)
+        {
+            var line = lines[i].Trim();
+            if (!Normalize(line).StartsWith(Normalize(label), StringComparison.Ordinal)) continue;
+            // Moodle renders attempt summaries as label/value cells. body.innerText may put
+            // both cells on one line (tab-separated), or put the value on the following line.
+            // Strip the label first: searching for any colon would hit the time in "11:16 AM".
+            var value = line.Length >= label.Length
+                ? line[label.Length..].Trim(' ', '\t', ':', '：')
+                : string.Empty;
+            if (value.Length == 0 && i + 1 < lines.Length) value = lines[i + 1].Trim();
+            if (value.Length > 0) return Regex.Replace(value, @"\s+", " ");
+        }
         return null;
     }
     private static string CanonicalUrl(string value)
@@ -137,7 +155,9 @@ public static class MoodleQuizMessageFormatter
                 if (!string.IsNullOrWhiteSpace(quiz.StartedAt)) text.Append("  بدأت: ").AppendLine(quiz.StartedAt);
                 if (!string.IsNullOrWhiteSpace(quiz.CompletedAt)) text.Append("  اكتملت: ").AppendLine(quiz.CompletedAt);
                 if (!string.IsNullOrWhiteSpace(quiz.Duration)) text.Append("  مدة المحاولة: ").AppendLine(quiz.Duration);
-                if (!string.IsNullOrWhiteSpace(quiz.Grade)) text.Append("  الدرجة: ").AppendLine(quiz.Grade);
+                if (!string.IsNullOrWhiteSpace(quiz.Grade)) text.Append("  الدرجة: ").AppendLine(ArabicGrade(quiz.Grade));
+                if (quiz.ReviewStatus != "غير متاح") text.Append("  المراجعة: ").AppendLine(ArabicReview(quiz.ReviewStatus));
+                if (quiz.FurtherAttempts != "غير متاح") text.Append("  المحاولات القادمة: ").AppendLine(ArabicAttempts(quiz.FurtherAttempts));
                 text.Append("  الرابط: ").AppendLine(quiz.Url);
             }
         }
@@ -153,7 +173,25 @@ public static class MoodleQuizMessageFormatter
         "غير متاح" => value, "This quiz is currently not available" or "This quiz is not available" => "غير متاح حالياً",
         "This quiz is available" => "متاح حالياً", "You can no longer attempt this quiz" => "انتهت إمكانية المحاولة",
         "Finished" => "مكتملة", "In progress" => "قيد التنفيذ", "Overdue" => "انتهى الوقت", "Abandoned" => "متروكة",
+        "انتهى موعد الاختبار" => value, "لم يبدأ بعد" => value, "لم تظهر محاولة مسجلة" => value,
         "لم تبدأ" or "قيد التنفيذ" or "مكتملة" or "مكتمل" or "منتهية" or "منتهي" or "هذا الاختبار غير متاح حالياً" or "هذا الاختبار غير متاح حاليا" or "الاختبار غير متاح حالياً" => value,
+        _ => value
+    };
+    private static string ArabicReview(string value) => value switch
+    {
+        "Review not permitted" or "Review is not permitted" => "غير مسموح بها",
+        "المراجعة غير مسموح بها" or "المراجعة غير مسموحة" or "لا يسمح بمراجعة الاختبار" => value,
+        _ => value
+    };
+    private static string ArabicAttempts(string value) => value switch
+    {
+        "No more attempts are allowed" or "No more attempts allowed" => "لا توجد محاولات أخرى مسموحة",
+        "غير مسموح بأي محاولات أخرى" or "لا توجد محاولات أخرى مسموحة" or "لا يسمح بمحاولات أخرى" => value,
+        _ => value
+    };
+    private static string ArabicGrade(string value) => value switch
+    {
+        "Not yet graded" => "لم يتم تصحيحها بعد",
         _ => value
     };
 }
