@@ -73,13 +73,16 @@ public sealed class GeminiChatService(
                 logger.LogWarning("Primary Gemini model {Model} timed out; trying configured fallback model {FallbackModel} once.", model, selectedModel);
                 response = await SendWithRetryAsync(selectedModel, apiKey, payload, 1, FallbackRequestTimeout, cancellationToken);
             }
-            if (response.StatusCode == HttpStatusCode.ServiceUnavailable
-                && selectedModel.Equals(model, StringComparison.OrdinalIgnoreCase)
-                && CanFallback(model, fallbackModel))
+            if (ShouldUseFallback(response, selectedModel, model, fallbackModel))
             {
+                var failureStatusCode = response.StatusCode;
+                var googleStatus = failureStatusCode == HttpStatusCode.NotFound
+                    ? await ReadSafeGoogleStatusAsync(response, cancellationToken)
+                    : "UNAVAILABLE";
                 response.Dispose();
                 selectedModel = fallbackModel!;
-                logger.LogWarning("Primary Gemini model {Model} remained unavailable after retry; trying configured fallback model {FallbackModel} once.", model, selectedModel);
+                logger.LogWarning("Primary Gemini model {Model} returned HTTP {HttpStatus} ({GoogleStatus}); trying configured fallback model {FallbackModel} once.",
+                    model, (int)failureStatusCode, googleStatus, selectedModel);
                 response = await SendWithRetryAsync(selectedModel, apiKey, payload, 1, FallbackRequestTimeout, cancellationToken);
             }
             using (response)
@@ -193,6 +196,11 @@ public sealed class GeminiChatService(
 
     private static bool CanFallback(string primary, string? fallback) =>
         !string.IsNullOrWhiteSpace(fallback) && !primary.Equals(fallback, StringComparison.OrdinalIgnoreCase);
+
+    private static bool ShouldUseFallback(HttpResponseMessage response, string selectedModel, string primaryModel, string? fallbackModel) =>
+        selectedModel.Equals(primaryModel, StringComparison.OrdinalIgnoreCase)
+        && CanFallback(primaryModel, fallbackModel)
+        && (response.StatusCode == HttpStatusCode.ServiceUnavailable || response.StatusCode == HttpStatusCode.NotFound);
 
     private static async Task<string> ReadSafeGoogleStatusAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
