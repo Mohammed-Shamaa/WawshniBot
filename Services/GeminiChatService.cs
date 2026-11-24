@@ -21,7 +21,9 @@ public sealed class GeminiChatService(
     private readonly ConcurrentDictionary<long, Conversation> _conversations = new();
 
     private const string SystemInstruction = """
-        You are WawshniBot, a friendly and capable academic assistant. Speak naturally in the same language as the user's latest message; support Arabic (including Palestinian Arabic) and English. Explain clearly, ask a concise follow-up when necessary, and help with general study, programming, math, science, writing, and everyday questions.
+        You are WawshniBot, a charming, funny, emotionally intelligent conversation partner and academic helper. Sound like a real, warm person: lively, kind, attentive, and easy to talk to. Pick up the user's mood and conversational cues, respond directly to what they said, and keep a natural back-and-forth rather than turning every message into a lecture. Use light, clever humor when it fits; never force jokes, mock the user, or joke during serious or sensitive moments.
+
+        Match the language and register of the user's latest message. For colloquial Palestinian Arabic, answer in smooth, friendly Palestinian/Levantine Arabic; for formal Arabic, use clear Arabic; for English, use natural conversational English. A simple greeting deserves a warm, playful greeting, not a generic customer-service script. Keep ordinary replies brief, use emojis sparingly, and explain more when the user asks for detail. Help with general study, programming, math, science, writing, and everyday questions.
 
         Wawshni is a Telegram assistant connected to Moodle. The bot has separate commands that retrieve live account data: /my_courses, /my_assignments, /my_exams, and /all_exams. This chat model call does not receive the user's Moodle records or live page data. Never claim to know their enrolled courses, grades, assignment status, exam schedule, or account state unless the user supplied those facts in this conversation. Direct Moodle-data requests to the appropriate bot command. Never ask for a Moodle password, Telegram token, or API key.
 
@@ -61,10 +63,18 @@ public sealed class GeminiChatService(
             using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                logger.LogWarning("Gemini request failed with HTTP {StatusCode}.", (int)response.StatusCode);
-                var message = response.StatusCode == HttpStatusCode.TooManyRequests
-                    ? "وصل المساعد الذكي إلى حد الاستخدام مؤقتاً. حاول بعد قليل."
-                    : "تعذر الحصول على رد من المساعد الذكي حالياً. حاول مرة أخرى لاحقاً.";
+                var googleStatus = await ReadSafeGoogleStatusAsync(response, cancellationToken);
+                logger.LogWarning("Gemini request failed. HTTP status {HttpStatus}; Google status {GoogleStatus}; model {Model}. API key, response body, and user message omitted.",
+                    (int)response.StatusCode, googleStatus, model);
+                var message = response.StatusCode switch
+                {
+                    HttpStatusCode.TooManyRequests => "Gemini أخذ استراحة قصيرة بسبب حد الاستخدام 😅 جرّب بعد شوي.",
+                    HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => "إعداد مفتاح Gemini يحتاج مراجعة من مسؤول البوت. جرّب لاحقاً.",
+                    HttpStatusCode.NotFound => "اسم موديل Gemini غير متاح حالياً؛ أبلغ مسؤول البوت.",
+                    _ => "المساعد أخذ استراحة غير مخططة 😅 جرّب تحكي معي كمان شوي."
+                };
+                if (googleStatus == "INVALID_API_KEY") message = "مفتاح Gemini غير صالح أو غير مفعّل. أبلغ مسؤول البوت ليراجع إعداداته.";
+                else if (googleStatus == "MODEL_NOT_FOUND") message = "اسم موديل Gemini غير متاح. أبلغ مسؤول البوت ليراجع إعداد الموديل.";
                 return new(GeminiReplyKind.Unavailable, message);
             }
 
@@ -122,6 +132,30 @@ public sealed class GeminiChatService(
         return string.Join("", parts.EnumerateArray()
             .Where(part => part.TryGetProperty("text", out _))
             .Select(part => part.GetProperty("text").GetString() ?? "")).Trim();
+    }
+
+    private static async Task<string> ReadSafeGoogleStatusAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var json = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            if (json.RootElement.TryGetProperty("error", out var error)
+                )
+            {
+                var status = error.TryGetProperty("status", out var statusElement) && statusElement.ValueKind == JsonValueKind.String
+                    ? statusElement.GetString() ?? "" : "";
+                var message = error.TryGetProperty("message", out var messageElement) && messageElement.ValueKind == JsonValueKind.String
+                    ? messageElement.GetString() ?? "" : "";
+                if (message.Contains("API key", StringComparison.OrdinalIgnoreCase) || message.Contains("API_KEY_INVALID", StringComparison.OrdinalIgnoreCase)) return "INVALID_API_KEY";
+                if (message.Contains("model", StringComparison.OrdinalIgnoreCase) && (message.Contains("not found", StringComparison.OrdinalIgnoreCase) || message.Contains("not supported", StringComparison.OrdinalIgnoreCase))) return "MODEL_NOT_FOUND";
+                if (status.Equals("RESOURCE_EXHAUSTED", StringComparison.OrdinalIgnoreCase)) return "QUOTA_EXCEEDED";
+                return string.IsNullOrWhiteSpace(status) ? "unspecified" : status;
+            }
+        }
+        catch (JsonException) { }
+        catch (IOException) { }
+        return "unspecified";
     }
 
     private sealed class Conversation

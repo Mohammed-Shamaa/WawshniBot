@@ -45,7 +45,7 @@ The GitHub repository root is the project root. Create a Docker Web Service from
 - `Moodle__ScanIntervalMinutes=10`
 - `GoogleAI__Enabled=true` to enable natural Arabic/English chat
 - `GoogleAI__ApiKey` = API key from Google AI Studio (store only in Render; never commit it)
-- `GoogleAI__GeminiModel=gemini-3.8-flash`
+- `GoogleAI__GeminiModel` = `gemini-3.8-flash` (enter the variable name and value with no spaces around them)
 - `KeepAlive__Url=https://wawshnibot.onrender.com/health`
 - `KeepAlive__IntervalMinutes=10` (optional; clamped to 5–14 minutes)
 

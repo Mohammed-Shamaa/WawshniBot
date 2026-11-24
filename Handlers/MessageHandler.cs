@@ -293,7 +293,9 @@ public sealed class MessageHandler(
             case "/report": response = "التقارير ستتوفر في مرحلة لاحقة."; break;
             case var _ when messageText.StartsWith('/'): response = "لم أتعرف على هذا الأمر. أرسل /help."; break;
             default:
-                await SafeReply(message.Chat.Id, "⏳ جاري إعداد الرد...", reply, cancellationToken);
+                var thinkingMessage = messageText.Any(character => character is >= '\u0600' and <= '\u06FF')
+                    ? "🤔 لحظة بفكر..." : "🤔 One sec, thinking...";
+                await SafeReply(message.Chat.Id, thinkingMessage, reply, cancellationToken);
                 var geminiReply = await geminiChat.ReplyAsync(userId, messageText, cancellationToken);
                 response = geminiReply.Text;
                 break;
