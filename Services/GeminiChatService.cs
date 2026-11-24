@@ -18,7 +18,7 @@ public sealed class GeminiChatService(
     private const int MaxHistoryMessages = 12;
     private const int MaxMessageCharacters = 6000;
     private const int MaxRequestAttempts = 2;
-    private static readonly TimeSpan RequestAttemptTimeout = TimeSpan.FromSeconds(18);
+    private static readonly TimeSpan RequestAttemptTimeout = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan HistoryLifetime = TimeSpan.FromHours(2);
     private readonly ConcurrentDictionary<long, Conversation> _conversations = new();
 
@@ -38,6 +38,7 @@ public sealed class GeminiChatService(
         if (!settings.Enabled) return new(GeminiReplyKind.Disabled, "المساعد الذكي غير مفعّل حالياً.");
         var apiKey = settings.ApiKey?.Trim();
         var model = settings.GeminiModel?.Trim();
+        var fallbackModel = settings.FallbackModel?.Trim();
         if (string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(model))
         {
             logger.LogWarning("GoogleAI is enabled but its API key or model is not configured.");
@@ -56,16 +57,37 @@ public sealed class GeminiChatService(
                 .Select(message => new GeminiContent(message.Role, [new GeminiPart(message.Text)]))
                 .Append(new GeminiContent("user", [new GeminiPart(userText)]))
                 .ToArray();
-            var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{Uri.EscapeDataString(model)}:generateContent";
             var payload = new GeminiRequest(
                 new GeminiInstruction([new GeminiPart(SystemInstruction)]), contents,
                 new GeminiGenerationConfig(1200));
-            using var response = await SendWithRetryAsync(endpoint, apiKey, payload, cancellationToken);
+            var selectedModel = model;
+            HttpResponseMessage response;
+            try
+            {
+                response = await SendWithRetryAsync(model, apiKey, payload, MaxRequestAttempts, cancellationToken);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && CanFallback(model, fallbackModel))
+            {
+                selectedModel = fallbackModel!;
+                logger.LogWarning("Primary Gemini model {Model} timed out; trying configured fallback model {FallbackModel} once.", model, selectedModel);
+                response = await SendWithRetryAsync(selectedModel, apiKey, payload, 1, cancellationToken);
+            }
+            if (response.StatusCode == HttpStatusCode.ServiceUnavailable
+                && selectedModel.Equals(model, StringComparison.OrdinalIgnoreCase)
+                && CanFallback(model, fallbackModel))
+            {
+                response.Dispose();
+                selectedModel = fallbackModel!;
+                logger.LogWarning("Primary Gemini model {Model} remained unavailable after retry; trying configured fallback model {FallbackModel} once.", model, selectedModel);
+                response = await SendWithRetryAsync(selectedModel, apiKey, payload, 1, cancellationToken);
+            }
+            using (response)
+            {
             if (!response.IsSuccessStatusCode)
             {
                 var googleStatus = await ReadSafeGoogleStatusAsync(response, cancellationToken);
                 logger.LogWarning("Gemini request failed. HTTP status {HttpStatus}; Google status {GoogleStatus}; model {Model}. API key, response body, and user message omitted.",
-                    (int)response.StatusCode, googleStatus, model);
+                    (int)response.StatusCode, googleStatus, selectedModel);
                 var message = response.StatusCode switch
                 {
                     HttpStatusCode.TooManyRequests => "Gemini أخذ استراحة قصيرة بسبب حد الاستخدام 😅 جرّب بعد شوي.",
@@ -93,6 +115,7 @@ public sealed class GeminiChatService(
                 conversation.Messages.RemoveRange(0, conversation.Messages.Count - MaxHistoryMessages);
             conversation.LastActivity = DateTimeOffset.UtcNow;
             return new(GeminiReplyKind.Success, answer);
+            }
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -134,9 +157,10 @@ public sealed class GeminiChatService(
             .Select(part => part.GetProperty("text").GetString() ?? "")).Trim();
     }
 
-    private async Task<HttpResponseMessage> SendWithRetryAsync(string endpoint, string apiKey, GeminiRequest payload, CancellationToken cancellationToken)
+    private async Task<HttpResponseMessage> SendWithRetryAsync(string model, string apiKey, GeminiRequest payload, int maxAttempts, CancellationToken cancellationToken)
     {
-        for (var attempt = 1; attempt <= MaxRequestAttempts; attempt++)
+        var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{Uri.EscapeDataString(model)}:generateContent";
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
             request.Headers.TryAddWithoutValidation("x-goog-api-key", apiKey);
@@ -148,17 +172,22 @@ public sealed class GeminiChatService(
             {
                 response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attemptTimeout.Token);
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt < MaxRequestAttempts)
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt < maxAttempts)
             {
-                logger.LogWarning("Gemini request timed out on attempt {Attempt}/{MaxAttempts}; retrying once.", attempt, MaxRequestAttempts);
+                logger.LogWarning("Gemini request timed out on attempt {Attempt}/{MaxAttempts}; retrying once.", attempt, maxAttempts);
                 await Task.Delay(TimeSpan.FromMilliseconds(900), cancellationToken);
                 continue;
             }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogWarning("Gemini model {Model} timed out after {Attempt} attempt(s).", model, attempt);
+                throw;
+            }
 
-            if (response.StatusCode == HttpStatusCode.ServiceUnavailable && attempt < MaxRequestAttempts)
+            if (response.StatusCode == HttpStatusCode.ServiceUnavailable && attempt < maxAttempts)
             {
                 response.Dispose();
-                logger.LogWarning("Gemini returned HTTP 503 on attempt {Attempt}/{MaxAttempts}; retrying once after backoff.", attempt, MaxRequestAttempts);
+                logger.LogWarning("Gemini returned HTTP 503 on attempt {Attempt}/{MaxAttempts}; retrying once after backoff.", attempt, maxAttempts);
                 await Task.Delay(TimeSpan.FromMilliseconds(900), cancellationToken);
                 continue;
             }
@@ -166,6 +195,9 @@ public sealed class GeminiChatService(
         }
         throw new HttpRequestException("Gemini retry attempts were exhausted.");
     }
+
+    private static bool CanFallback(string primary, string? fallback) =>
+        !string.IsNullOrWhiteSpace(fallback) && !primary.Equals(fallback, StringComparison.OrdinalIgnoreCase);
 
     private static async Task<string> ReadSafeGoogleStatusAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
