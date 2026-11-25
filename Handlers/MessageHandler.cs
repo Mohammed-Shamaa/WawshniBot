@@ -414,10 +414,13 @@ public sealed class MessageHandler(
         switch (command)
         {
             case "/start":
-                await SafeReply(chatId, "أهلاً بك في وشوشني.\n/help لعرض الأوامر\n/pending_users لطلبات الانضمام\n/users لإحصاءات المستخدمين\n/approve <id> أو /reject <id> أو /revoke <id> لإدارة الصلاحيات.", reply, cancellationToken);
+                await SafeReply(chatId, "أهلاً بك في وشوشني.\n/help لعرض الأوامر\n/admin لفتح لوحة الإدارة\n/pending_users لطلبات الانضمام\n/users لإحصاءات المستخدمين\n/approve <id> أو /reject <id> أو /revoke <id> لإدارة الصلاحيات.", reply, cancellationToken);
+                return true;
+            case "/admin":
+                await SafeReply(chatId, "لوحة إدارة وشوشني: https://wawshnibot.onrender.com/admin\nسجّل الدخول باسم المستخدم وكلمة المرور اللذين أعددتهما في إعدادات Render.", reply, cancellationToken);
                 return true;
             case "/help":
-                await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — اختيار مساق لعرض الواجبات\n/my_exams — اختيار مساق لعرض الاختبارات\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول أو إعادة قبول\n/reject <telegram_user_id> — رفض أو إلغاء اعتماد\n/revoke <telegram_user_id> — سحب اعتماد مستخدم\n\nاكتب سؤالك مباشرة للمساعد. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل إلى خدمة المساعد. ", reply, cancellationToken);
+                await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/admin — فتح لوحة الإدارة\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — اختيار مساق لعرض الواجبات\n/my_exams — اختيار مساق لعرض الاختبارات\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول أو إعادة قبول\n/reject <telegram_user_id> — رفض أو إلغاء اعتماد\n/revoke <telegram_user_id> — سحب اعتماد مستخدم\n\nاكتب سؤالك مباشرة للمساعد. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل إلى خدمة المساعد. ", reply, cancellationToken);
                 return true;
             case "/pending_users":
                 var pending = await users.GetPendingAsync(cancellationToken);
