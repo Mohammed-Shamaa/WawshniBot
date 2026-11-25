@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Wawshni.Bot.Moodle;
@@ -19,6 +20,8 @@ public sealed class MessageHandler(
     MoodleSessionRepository sessions,
     ILogger<MessageHandler> logger)
 {
+    private const long MaxImageBytes = 10 * 1024 * 1024;
+    private const string ImageAnalysisHelp = "ابعت صورة واسألني عنها، وبحللها لك. الصور تُرسل لخدمة Gemini للتحليل؛ تجنب إرسال صور حساسة أو خاصة.";
     private const string RejectedAccessNotice = "هههههههههههههههههههههههههههههههه يا هلفوت فش استخدام للبوت بكفي , روح افتح المودل\nحسابك حالياً غير معتمد لاستخدام وشوشني ارسل /my_access لمعرفة الحالة، وإذا عندك استفسار أو بتعتقد أنه صار خطأ، تواصل مع المهندس محمد: mohammedmomen177@gmail.com";
     private readonly ConcurrentDictionary<long, LinkFlow> _flows = new();
     private readonly ConcurrentDictionary<long, AssignmentCoursePicker> _assignmentCoursePickers = new();
@@ -28,11 +31,13 @@ public sealed class MessageHandler(
         Message message,
         Func<long, string, CancellationToken, Task> reply,
         Func<long, int, CancellationToken, Task> delete,
+        Func<string, long, CancellationToken, Task<byte[]>> downloadImage,
         Func<long, string, Guid, CancellationToken, Task> adminRequest,
         Func<long, string, IReadOnlyList<(string Text, string CallbackData)>, CancellationToken, Task> coursePicker,
         CancellationToken cancellationToken)
     {
         if (message.From is null || message.Chat is null) return;
+        var imageAttachment = GetImageAttachment(message);
         var userId = message.From.Id;
         if (await authorization.IsBlockedAsync(userId, cancellationToken))
         {
@@ -44,7 +49,7 @@ public sealed class MessageHandler(
         catch (Exception exception) when (exception is not OperationCanceledException)
         { logger.LogDebug("Could not update dashboard last-activity time ({ExceptionType}).", exception.GetType().Name); }
         var isAdmin = await authorization.IsAdminAsync(userId, cancellationToken);
-        if (string.IsNullOrWhiteSpace(message.Text))
+        if (string.IsNullOrWhiteSpace(message.Text) && imageAttachment is null)
         {
             if (!isAdmin)
             {
@@ -65,7 +70,7 @@ public sealed class MessageHandler(
             return;
         }
 
-        var messageText = message.Text.Trim();
+        var messageText = message.Text?.Trim() ?? "";
         var command = messageText.Split(' ', 2)[0].Split('@', 2)[0].ToLowerInvariant();
         if (isAdmin)
         {
@@ -111,7 +116,7 @@ public sealed class MessageHandler(
         if (command == "/help")
         {
             var help = registrationStatus == TelegramRegistrationStatus.Approved
-                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام\n\nوتقدر تطلبها بطريقتك، مثل «بدي أربط Moodle»، «ورجيني واجباتي»، أو «شو امتحاناتي؟». للأسئلة العادية، اكتب سؤالك مباشرة. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل رسائلك إلى خدمة المساعد لتوليد الرد."
+                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام\n\nوتقدر تطلبها بطريقتك، مثل «بدي أربط Moodle»، «ورجيني واجباتي»، أو «شو امتحاناتي؟». " + ImageAnalysisHelp + "\nللأسئلة العادية، اكتب سؤالك مباشرة. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل رسائلك إلى خدمة المساعد لتوليد الرد."
                 : "يمكنك استخدام /my_access لمعرفة حالة طلبك. لإرسال طلب انضمام أو إعادة عرضه أرسل /start.";
             await SafeReply(message.Chat.Id, help, reply, cancellationToken);
             return;
@@ -125,6 +130,16 @@ public sealed class MessageHandler(
                     ? "طلبك قيد مراجعة المسؤول. أرسل /my_access لمعرفة الحالة."
                     : RejectedAccessNotice;
             await SafeReply(message.Chat.Id, notice, reply, cancellationToken);
+            return;
+        }
+        if (imageAttachment is not null)
+        {
+            if (_flows.ContainsKey(userId))
+            {
+                await SafeReply(message.Chat.Id, "خلّينا نكمّل ربط Moodle أولاً؛ أرسل الرقم الجامعي أو كلمة المرور كنص، أو /cancel لإلغاء الربط. لن أرسل الصورة إلى المساعد أثناء إدخال بيانات الدخول.", reply, cancellationToken);
+                return;
+            }
+            await HandleImageAsync(message, imageAttachment, downloadImage, reply, cancellationToken);
             return;
         }
         if (!_flows.ContainsKey(userId) && !command.StartsWith('/')
@@ -325,6 +340,78 @@ public sealed class MessageHandler(
         await SafeReply(message.Chat.Id, response, reply, cancellationToken);
     }
 
+    private async Task HandleImageAsync(Message message, ImageAttachment attachment,
+        Func<string, long, CancellationToken, Task<byte[]>> downloadImage,
+        Func<long, string, CancellationToken, Task> reply, CancellationToken cancellationToken)
+    {
+        if (!IsSupportedImageMimeType(attachment.MimeType))
+        {
+            await SafeReply(message.Chat.Id, "أقدر أحلل صور JPEG أو PNG أو WebP أو HEIC/HEIF فقط حالياً.", reply, cancellationToken);
+            return;
+        }
+        if (attachment.FileSize is > MaxImageBytes)
+        {
+            await SafeReply(message.Chat.Id, "حجم الصورة كبير 😅 أرسل صورة أصغر من 10 ميغابايت.", reply, cancellationToken);
+            return;
+        }
+
+        var imageBytes = Array.Empty<byte>();
+        try
+        {
+            imageBytes = await downloadImage(attachment.FileId, MaxImageBytes, cancellationToken);
+            if (imageBytes.Length == 0)
+            {
+                await SafeReply(message.Chat.Id, "ما وصلني محتوى الصورة بشكل سليم. جرّب ترسلها مرة ثانية.", reply, cancellationToken);
+                return;
+            }
+            if (imageBytes.LongLength > MaxImageBytes)
+            {
+                await SafeReply(message.Chat.Id, "حجم الصورة كبير 😅 أرسل صورة أصغر من 10 ميغابايت.", reply, cancellationToken);
+                return;
+            }
+
+            await SafeReply(message.Chat.Id, "🤔 وصلت الصورة، خليني أشوفها...", reply, cancellationToken);
+            var prompt = string.IsNullOrWhiteSpace(message.Caption)
+                ? "حلل هذه الصورة واشرح محتواها بإيجاز، واذكر النصوص أو التفاصيل المهمة الظاهرة فيها. أجب بالعربية إلا إذا كان سياق المحادثة يوضح لغة أخرى."
+                : message.Caption.Trim();
+            if (prompt.Length > 6000)
+            {
+                await SafeReply(message.Chat.Id, "تعليق الصورة طويل جداً. أعد إرسالها بتعليق أقصر.", reply, cancellationToken);
+                return;
+            }
+            var result = await geminiChat.ReplyWithImageAsync(message.From!.Id, prompt, imageBytes, attachment.MimeType, cancellationToken);
+            await SafeReply(message.Chat.Id, result.Text, reply, cancellationToken);
+        }
+        catch (InvalidDataException)
+        {
+            await SafeReply(message.Chat.Id, "حجم الصورة كبير 😅 أرسل صورة أصغر من 10 ميغابايت.", reply, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning("Telegram image analysis failed ({ExceptionType}); image content and identifiers omitted.", exception.GetType().Name);
+            await SafeReply(message.Chat.Id, "تعذر استلام الصورة أو تحليلها حالياً. جرّب صورة أصغر أو أعد المحاولة بعد قليل.", reply, cancellationToken);
+        }
+        finally
+        {
+            if (imageBytes.Length > 0) CryptographicOperations.ZeroMemory(imageBytes);
+        }
+    }
+
+    private static ImageAttachment? GetImageAttachment(Message message)
+    {
+        if (message.Photo is { Length: > 0 } photos)
+        {
+            var largest = photos[^1];
+            return new ImageAttachment(largest.FileId, "image/jpeg", largest.FileSize);
+        }
+        if (message.Document is { MimeType: { } mimeType } document && mimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            return new ImageAttachment(document.FileId, mimeType.ToLowerInvariant(), document.FileSize);
+        return null;
+    }
+
+    private static bool IsSupportedImageMimeType(string mimeType) => mimeType is
+        "image/jpeg" or "image/png" or "image/webp" or "image/heic" or "image/heif";
+
     public async Task HandleCallbackAsync(
         CallbackQuery callback,
         Func<long, string, CancellationToken, Task> reply,
@@ -427,7 +514,7 @@ public sealed class MessageHandler(
                 await SafeReply(chatId, "لوحة إدارة وشوشني: https://wawshnibot.onrender.com/admin\nسجّل الدخول باسم المستخدم وكلمة المرور اللذين أعددتهما في إعدادات Render.", reply, cancellationToken);
                 return true;
             case "/help":
-                await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/admin — فتح لوحة الإدارة\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — اختيار مساق لعرض الواجبات\n/my_exams — اختيار مساق لعرض الاختبارات\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول طلب معلق أو إعادة اعتماد مرفوض\n/reject <telegram_user_id> — رفض طلب معلق فقط\n/revoke <telegram_user_id> — سحب اعتماد مستخدم معتمد\n\nتقدر كمان تطلب مهام Moodle بطريقتك، مثل «بدي أربط Moodle»، «ورجيني واجباتي»، أو «شو امتحاناتي؟». لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل العادية إلى خدمة المساعد. ", reply, cancellationToken);
+                await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/admin — فتح لوحة الإدارة\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — اختيار مساق لعرض الواجبات\n/my_exams — اختيار مساق لعرض الاختبارات\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول طلب معلق أو إعادة اعتماد مرفوض\n/reject <telegram_user_id> — رفض طلب معلق فقط\n/revoke <telegram_user_id> — سحب اعتماد مستخدم معتمد\n\nتقدر كمان تطلب مهام Moodle بطريقتك، مثل «بدي أربط Moodle»، «ورجيني واجباتي»، أو «شو امتحاناتي؟». " + ImageAnalysisHelp + " لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل العادية إلى خدمة المساعد. ", reply, cancellationToken);
                 return true;
             case "/pending_users":
                 var pending = await users.GetPendingAsync(cancellationToken);
@@ -655,5 +742,6 @@ public sealed class MessageHandler(
 
     private enum LinkStep { StudentId, Password }
     private sealed record LinkFlow(LinkStep Step, string? StudentId, DateTimeOffset StartedAt);
+    private sealed record ImageAttachment(string FileId, string MimeType, long? FileSize);
     private sealed record AssignmentCoursePicker(Guid RequestId, IReadOnlyDictionary<int, string> Courses, DateTimeOffset ExpiresAt);
 }

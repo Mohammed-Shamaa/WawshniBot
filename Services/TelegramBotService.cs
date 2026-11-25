@@ -58,6 +58,17 @@ public sealed class TelegramBotService : IUpdateHandler
             await _handler.HandleAsync(message,
                 async (chatId, text, ct) => await botClient.SendMessage(chatId, text, cancellationToken: ct),
                 async (chatId, messageId, ct) => await botClient.DeleteMessage(chatId, messageId, ct),
+                async (fileId, maxBytes, ct) =>
+                {
+                    var telegramFile = await botClient.GetFile(fileId, ct);
+                    if (telegramFile.FileSize is > 0 && telegramFile.FileSize > maxBytes)
+                        throw new InvalidDataException("Telegram image exceeds the configured limit.");
+                    await using var buffer = new MemoryStream();
+                    await botClient.DownloadFile(telegramFile, buffer, ct);
+                    if (buffer.Length > maxBytes)
+                        throw new InvalidDataException("Telegram image exceeds the configured limit.");
+                    return buffer.ToArray();
+                },
                 async (chatId, text, callbackData, ct) => await botClient.SendMessage(chatId, text,
                     replyMarkup: new InlineKeyboardMarkup(new[]
                     {
