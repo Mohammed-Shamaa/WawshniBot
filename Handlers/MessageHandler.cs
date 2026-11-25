@@ -111,7 +111,7 @@ public sealed class MessageHandler(
         if (command == "/help")
         {
             var help = registrationStatus == TelegramRegistrationStatus.Approved
-                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام\n\nلإجابة الأسئلة العادية، اكتب سؤالك مباشرة. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل رسائلك إلى خدمة المساعد لتوليد الرد."
+                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام\n\nوتقدر تطلبها بطريقتك، مثل «بدي أربط Moodle»، «ورجيني واجباتي»، أو «شو امتحاناتي؟». للأسئلة العادية، اكتب سؤالك مباشرة. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل رسائلك إلى خدمة المساعد لتوليد الرد."
                 : "يمكنك استخدام /my_access لمعرفة حالة طلبك. لإرسال طلب انضمام أو إعادة عرضه أرسل /start.";
             await SafeReply(message.Chat.Id, help, reply, cancellationToken);
             return;
@@ -126,6 +126,12 @@ public sealed class MessageHandler(
                     : RejectedAccessNotice;
             await SafeReply(message.Chat.Id, notice, reply, cancellationToken);
             return;
+        }
+        if (!_flows.ContainsKey(userId) && !command.StartsWith('/')
+            && NaturalLanguageCommandRouter.MapToCommand(messageText) is { } routedCommand)
+        {
+            command = routedCommand;
+            logger.LogInformation("Mapped an approved user's natural-language request to {Command}.", routedCommand);
         }
         if (command == "/cancel")
         {
@@ -421,7 +427,7 @@ public sealed class MessageHandler(
                 await SafeReply(chatId, "لوحة إدارة وشوشني: https://wawshnibot.onrender.com/admin\nسجّل الدخول باسم المستخدم وكلمة المرور اللذين أعددتهما في إعدادات Render.", reply, cancellationToken);
                 return true;
             case "/help":
-                await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/admin — فتح لوحة الإدارة\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — اختيار مساق لعرض الواجبات\n/my_exams — اختيار مساق لعرض الاختبارات\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول طلب معلق أو إعادة اعتماد مرفوض\n/reject <telegram_user_id> — رفض طلب معلق فقط\n/revoke <telegram_user_id> — سحب اعتماد مستخدم معتمد\n\nاكتب سؤالك مباشرة للمساعد. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل إلى خدمة المساعد. ", reply, cancellationToken);
+                await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/admin — فتح لوحة الإدارة\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — اختيار مساق لعرض الواجبات\n/my_exams — اختيار مساق لعرض الاختبارات\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول طلب معلق أو إعادة اعتماد مرفوض\n/reject <telegram_user_id> — رفض طلب معلق فقط\n/revoke <telegram_user_id> — سحب اعتماد مستخدم معتمد\n\nتقدر كمان تطلب مهام Moodle بطريقتك، مثل «بدي أربط Moodle»، «ورجيني واجباتي»، أو «شو امتحاناتي؟». لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل العادية إلى خدمة المساعد. ", reply, cancellationToken);
                 return true;
             case "/pending_users":
                 var pending = await users.GetPendingAsync(cancellationToken);
