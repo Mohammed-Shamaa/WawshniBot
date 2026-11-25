@@ -7,4 +7,5 @@ public sealed class GoogleAiOptions
     public string ApiKey { get; set; } = "";
     public string GeminiModel { get; set; } = "gemini-3.8-flash";
     public string FallbackModel { get; set; } = "gemini-3.5-flash";
+    public string FallbackModel2 { get; set; } = "";
 }

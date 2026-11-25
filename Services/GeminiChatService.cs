@@ -62,6 +62,7 @@ public sealed class GeminiChatService(
         var apiKey = settings.ApiKey?.Trim();
         var model = settings.GeminiModel?.Trim();
         var fallbackModel = settings.FallbackModel?.Trim();
+        var fallbackModel2 = settings.FallbackModel2?.Trim();
         if (string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(model))
         {
             logger.LogWarning("Google AI chat is enabled but its API key or model is not configured.");
@@ -87,30 +88,8 @@ public sealed class GeminiChatService(
             var payload = new GeminiRequest(
                 new GeminiInstruction([new GeminiPart(instruction ?? SystemInstruction)]), contents,
                 new GeminiGenerationConfig(1200));
-            var selectedModel = model;
-            HttpResponseMessage response;
-            try
-            {
-                response = await SendWithRetryAsync(model, apiKey, payload, MaxRequestAttempts, PrimaryRequestTimeout, cancellationToken);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && CanFallback(model, fallbackModel))
-            {
-                selectedModel = fallbackModel!;
-                logger.LogWarning("Primary Gemini model {Model} timed out; trying configured fallback model {FallbackModel} once.", model, selectedModel);
-                response = await SendWithRetryAsync(selectedModel, apiKey, payload, 1, FallbackRequestTimeout, cancellationToken);
-            }
-            if (ShouldUseFallback(response, selectedModel, model, fallbackModel))
-            {
-                var failureStatusCode = response.StatusCode;
-                var googleStatus = failureStatusCode is HttpStatusCode.NotFound or HttpStatusCode.TooManyRequests
-                    ? await ReadSafeGoogleStatusAsync(response, cancellationToken)
-                    : "UNAVAILABLE";
-                response.Dispose();
-                selectedModel = fallbackModel!;
-                logger.LogWarning("Primary Gemini model {Model} returned HTTP {HttpStatus} ({GoogleStatus}); trying configured fallback model {FallbackModel} once.",
-                    model, (int)failureStatusCode, googleStatus, selectedModel);
-                response = await SendWithRetryAsync(selectedModel, apiKey, payload, 1, FallbackRequestTimeout, cancellationToken);
-            }
+            var (response, selectedModel) = await SendAcrossModelsAsync(
+                model, [fallbackModel, fallbackModel2], apiKey, payload, cancellationToken);
             using (response)
             {
             if (!response.IsSuccessStatusCode)
@@ -223,15 +202,54 @@ public sealed class GeminiChatService(
         throw new HttpRequestException("Gemini retry attempts were exhausted.");
     }
 
-    private static bool CanFallback(string primary, string? fallback) =>
-        !string.IsNullOrWhiteSpace(fallback) && !primary.Equals(fallback, StringComparison.OrdinalIgnoreCase);
+    private async Task<(HttpResponseMessage Response, string SelectedModel)> SendAcrossModelsAsync(
+        string primaryModel, IEnumerable<string?> fallbackModels, string apiKey, GeminiRequest payload,
+        CancellationToken cancellationToken)
+    {
+        var models = new[] { primaryModel }
+            .Concat(fallbackModels)
+            .Where(candidate => !string.IsNullOrWhiteSpace(candidate))
+            .Select(candidate => candidate!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
-    private static bool ShouldUseFallback(HttpResponseMessage response, string selectedModel, string primaryModel, string? fallbackModel) =>
-        selectedModel.Equals(primaryModel, StringComparison.OrdinalIgnoreCase)
-        && CanFallback(primaryModel, fallbackModel)
-        && (response.StatusCode == HttpStatusCode.ServiceUnavailable
-            || response.StatusCode == HttpStatusCode.NotFound
-            || response.StatusCode == HttpStatusCode.TooManyRequests);
+        for (var index = 0; index < models.Length; index++)
+        {
+            var currentModel = models[index];
+            HttpResponseMessage response;
+            try
+            {
+                response = await SendWithRetryAsync(currentModel, apiKey, payload,
+                    index == 0 ? MaxRequestAttempts : 1,
+                    index == 0 ? PrimaryRequestTimeout : FallbackRequestTimeout,
+                    cancellationToken);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogWarning("Gemini model {Model} timed out; trying the next configured model when available.", currentModel);
+                if (index == models.Length - 1) throw;
+                continue;
+            }
+
+            var isRetryableFailure = response.StatusCode is HttpStatusCode.ServiceUnavailable
+                or HttpStatusCode.NotFound or HttpStatusCode.TooManyRequests;
+            if (isRetryableFailure && index < models.Length - 1)
+            {
+                var statusCode = response.StatusCode;
+                var googleStatus = statusCode is HttpStatusCode.NotFound or HttpStatusCode.TooManyRequests
+                    ? await ReadSafeGoogleStatusAsync(response, cancellationToken)
+                    : "UNAVAILABLE";
+                response.Dispose();
+                logger.LogWarning("Gemini model {Model} returned HTTP {HttpStatus} ({GoogleStatus}); trying next configured model {NextModel}.",
+                    currentModel, (int)statusCode, googleStatus, models[index + 1]);
+                continue;
+            }
+
+            return (response, currentModel);
+        }
+
+        throw new HttpRequestException("All configured Gemini models were unavailable.");
+    }
 
     private static async Task<string> ReadSafeGoogleStatusAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
