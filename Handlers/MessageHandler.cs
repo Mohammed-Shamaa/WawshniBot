@@ -180,7 +180,7 @@ public sealed class MessageHandler(
                     return;
                 }
                 _flows[message.From.Id] = flow with { Step = LinkStep.Password, StudentId = messageText };
-                await SafeReply(message.Chat.Id, "تم استلام الرقم الجامعي. أرسل كلمة مرور Moodle الآن كرسالة واحدة. سيحاول البوت حذف الرسالة فور استلامها.", reply, cancellationToken);
+                await SafeReply(message.Chat.Id, "تم استلام الرقم الجامعي. أرسل كلمة مرور Moodle الآن كرسالة واحدة، والبوت سيحذف الرسالة فور استلامها.", reply, cancellationToken);
                 return;
             }
 
