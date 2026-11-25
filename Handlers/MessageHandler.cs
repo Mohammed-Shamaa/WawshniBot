@@ -215,7 +215,7 @@ public sealed class MessageHandler(
                 response = status.Connected
                     ? "حساب Moodle مربوط والجلسة صالحة حالياً. أرسل /my_courses لعرض المساقات."
                     : status.Expired ? "انتهت جلسة Moodle. أرسل /link لإعادة الربط."
-                    : status.Unavailable ? "تعذر الاتصال بـ Moodle للتحقق من الجلسة حالياً. احتفظت بالجلسة المخزنة؛ حاول مرة أخرى لاحقاً."
+                    : status.Unavailable ? MoodleAvailabilityMessages.TemporarilyUnavailable
                     : "حساب Moodle غير مربوط. أرسل /link للبدء.";
                 break;
             case "/my_courses":
@@ -488,7 +488,7 @@ public sealed class MessageHandler(
     {
         MoodleAssignmentsResultKind.Expired => "جلسة Moodle غير موجودة أو انتهت. أرسل /link لإعادة الربط.",
         MoodleAssignmentsResultKind.SessionRestoreFailed => "تعذر استرجاع جلسة Moodle المحفوظة. أرسل /link لإعادة ربط الحساب.",
-        MoodleAssignmentsResultKind.Unavailable => "تعذر فتح Moodle حالياً لقراءة المساقات. حاول لاحقاً أو تحقق من /status.",
+        MoodleAssignmentsResultKind.Unavailable => MoodleAvailabilityMessages.TemporarilyUnavailable,
         _ => "تم فتح Moodle، لكن تعذر استخراج قائمة المساقات. لم أعتبر ذلك دليلاً على عدم وجود مساقات."
     };
 
@@ -619,6 +619,7 @@ public sealed class MessageHandler(
     private static string FormatLinkResult(MoodleLinkResult result) => result.Kind switch
     {
         MoodleLinkResultKind.NoCourses => "تم التحقق من الحساب وحفظ الجلسة المشفّرة، وأظهرت صفحة Moodle رسالة صريحة بعدم وجود مساقات مسجلة حالياً.",
+        MoodleLinkResultKind.Unavailable => MoodleAvailabilityMessages.TemporarilyUnavailable,
         MoodleLinkResultKind.CoursesNotDetected => "تم التحقق من الحساب وحفظ الجلسة المشفّرة، لكن لم أتعرف على عناصر المساقات في الصفحة. هذا لا يعني أن حسابك بلا مساقات؛ راجع سجل التشخيص ثم أرسل /my_courses لاحقاً.",
         MoodleLinkResultKind.UnexpectedRedirect => "تم التحقق من الحساب وحفظ الجلسة، لكن Moodle حوّل طلب المساقات إلى صفحة غير متوقعة. تحقق عبر /status ثم أعد المحاولة.",
         MoodleLinkResultKind.DashboardRedirect => "تم التحقق من الحساب وحفظ الجلسة، لكن صفحة المساقات أعادت توجيهي إلى لوحة Moodle. لم أعتبر ذلك دليلاً على عدم وجود مساقات.",
@@ -642,6 +643,7 @@ public sealed class MessageHandler(
         MoodleLinkResultKind.UnexpectedRedirect => "حوّل Moodle طلب المساقات إلى صفحة غير متوقعة. تحقق من الجلسة عبر /status ثم أعد المحاولة.",
         MoodleLinkResultKind.DashboardRedirect => "حوّل Moodle طلب المساقات إلى لوحة الحساب دون ظهور قائمة المساقات. لم أعتبر ذلك دليلاً على عدم وجود مساقات.",
         MoodleLinkResultKind.Success when result.CoursesRetrieved => "مساقاتك المسجلة في Moodle:\n• " + string.Join("\n• ", result.Courses),
+        MoodleLinkResultKind.Unavailable => MoodleAvailabilityMessages.TemporarilyUnavailable,
         _ => "تعذر جلب المساقات من Moodle. أرسل /status للتحقق من الجلسة أو /link لإعادة الربط."
     };
 

@@ -1,5 +1,6 @@
 using System.Globalization;
 using Wawshni.Bot.Moodle;
+using Wawshni.Bot.Services;
 
 namespace Wawshni.Bot.Handlers;
 
@@ -9,7 +10,7 @@ public static class MoodleAssignmentMessageFormatter
     {
         if (result.Kind == MoodleAssignmentsResultKind.Expired) return "جلسة Moodle غير موجودة أو انتهت. أرسل /link لإعادة الربط.";
         if (result.Kind == MoodleAssignmentsResultKind.SessionRestoreFailed) return "تعذر استرجاع جلسة Moodle المحفوظة. أرسل /link لإعادة ربط الحساب.";
-        if (result.Kind == MoodleAssignmentsResultKind.Unavailable) return "تعذر فتح Moodle حالياً لاسترجاع الواجبات. حاول لاحقاً أو تحقق من /status.";
+        if (result.Kind == MoodleAssignmentsResultKind.Unavailable) return MoodleAvailabilityMessages.TemporarilyUnavailable;
         if (result.Kind == MoodleAssignmentsResultKind.ExtractionFailed) return "تم فتح Moodle، لكن تعذر التعرف على قائمة المساقات أو الواجبات. لم أعتبر ذلك دليلاً على عدم وجود واجبات.";
 
         var ordered = MoodleAssignmentExtractor.Sort(result.Assignments, now);

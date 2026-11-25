@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
+using Wawshni.Bot.Services;
 
 namespace Wawshni.Bot.Moodle;
 
@@ -126,7 +127,7 @@ public static class MoodleQuizMessageFormatter
         var text = new System.Text.StringBuilder("📝 اختباراتك وامتحاناتك في Moodle");
         if (result.Kind == MoodleQuizResultKind.Expired) return "انتهت جلسة Moodle. أرسل /link لإعادة الربط.";
         if (result.Kind == MoodleQuizResultKind.SessionRestoreFailed) return "تعذر استرجاع جلسة Moodle المحفوظة. أرسل /link لإعادة الربط.";
-        if (result.Kind == MoodleQuizResultKind.Unavailable) return "تعذر الاتصال بـ Moodle لقراءة الاختبارات حالياً. حاول لاحقاً.";
+        if (result.Kind == MoodleQuizResultKind.Unavailable) return MoodleAvailabilityMessages.TemporarilyUnavailable;
         if (result.Kind == MoodleQuizResultKind.ExtractionFailed) return "تعذر استخراج الاختبارات من Moodle. لم أعتبر ذلك دليلاً على عدم وجود اختبارات.";
         text.AppendLine(result.Kind == MoodleQuizResultKind.Partial ? " (نتائج جزئية)" : "");
         text.AppendLine($"المساقات: {result.TotalCourses}؛ فُحص {result.CoursesInspected}، بلا اختبارات {result.CoursesWithoutQuizzes}، وتعذر فحص {result.CoursesFailed}.");
