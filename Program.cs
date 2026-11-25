@@ -8,6 +8,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.HttpOverrides;
 using System.Threading.RateLimiting;
 using System.Text.Json.Serialization;
 
@@ -84,6 +85,18 @@ await app.Services.GetRequiredService<TelegramUserRepository>()
     .EnsureSchemaAsync(administratorId, app.Lifetime.ApplicationStopping);
 await app.Services.GetRequiredService<MoodleSessionRepository>()
     .EnsureSchemaAsync(app.Lifetime.ApplicationStopping);
+if (!app.Environment.IsDevelopment())
+{
+    var forwardedHeaders = new ForwardedHeadersOptions
+    {
+        ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+        ForwardLimit = 1
+    };
+    // Render's ingress proxy addresses are dynamic; the service is reachable through that proxy.
+    forwardedHeaders.KnownIPNetworks.Clear();
+    forwardedHeaders.KnownProxies.Clear();
+    app.UseForwardedHeaders(forwardedHeaders);
+}
 app.UseRouting();
 app.UseRateLimiter();
 app.UseAuthentication();
