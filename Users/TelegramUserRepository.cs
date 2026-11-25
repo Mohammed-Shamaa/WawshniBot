@@ -1,4 +1,5 @@
 using Npgsql;
+using NpgsqlTypes;
 using Wawshni.Bot.Services;
 
 namespace Wawshni.Bot.Users;
@@ -265,10 +266,10 @@ public sealed class TelegramUserRepository(NeonDatabaseReadiness database)
             """;
         await using var connection = await RequireDataSource().OpenConnectionAsync(cancellationToken);
         await using var command = new NpgsqlCommand(sql, connection);
-        command.Parameters.AddWithValue("action", (object?)action ?? DBNull.Value);
-        command.Parameters.AddWithValue("target", (object?)target ?? DBNull.Value);
-        command.Parameters.AddWithValue("from", (object?)from ?? DBNull.Value);
-        command.Parameters.AddWithValue("to", (object?)to ?? DBNull.Value);
+        command.Parameters.Add(new NpgsqlParameter("action", NpgsqlDbType.Text) { Value = (object?)action ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter("target", NpgsqlDbType.Bigint) { Value = (object?)target ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter("from", NpgsqlDbType.TimestampTz) { Value = (object?)from ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter("to", NpgsqlDbType.TimestampTz) { Value = (object?)to ?? DBNull.Value });
         command.Parameters.AddWithValue("limit", pageSize);
         command.Parameters.AddWithValue("offset", (page - 1) * pageSize);
         var entries = new List<TelegramUserAuditEntry>();
@@ -290,9 +291,9 @@ public sealed class TelegramUserRepository(NeonDatabaseReadiness database)
 
     private static void AddUserFilters(NpgsqlCommand command, string? search, string? status, bool? blocked)
     {
-        command.Parameters.AddWithValue("search", (object?)search ?? DBNull.Value);
-        command.Parameters.AddWithValue("status", (object?)status ?? DBNull.Value);
-        command.Parameters.AddWithValue("blocked", (object?)blocked ?? DBNull.Value);
+        command.Parameters.Add(new NpgsqlParameter("search", NpgsqlDbType.Text) { Value = (object?)search ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter("status", NpgsqlDbType.Text) { Value = (object?)status ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter("blocked", NpgsqlDbType.Boolean) { Value = (object?)blocked ?? DBNull.Value });
     }
 
     private async Task<TelegramUserRegistration?> GetByTelegramIdForUpdateAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, long userId, CancellationToken cancellationToken)
