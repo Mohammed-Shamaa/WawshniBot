@@ -113,7 +113,9 @@ public static class AdminDashboardEndpoints
                 SafeReason(request.Reason), actor.Identity?.Name);
             if (updated is null) return Results.Conflict(new { error = "state_changed" });
             var message = target == TelegramRegistrationStatus.Approved
-                ? "🎉 تمت الموافقة على طلبك. أصبح بإمكانك استخدام وشوشني. أرسل /link لربط Moodle."
+                ? current.Status == TelegramRegistrationStatus.Rejected
+                    ? AccessNotificationMessages.Reapproved
+                    : "🎉 تمت الموافقة على طلبك. أصبح بإمكانك استخدام وشوشني. أرسل /link لربط Moodle."
                 : "تم تحديث حالة حسابك إلى غير معتمد. تواصل مع مسؤول وشوشني إذا كنت ترى أن ذلك غير صحيح.";
             var notificationSent = await NotifySafelyAsync(bot, userId, message, loggerFactory, cancellationToken);
             return Results.Ok(new { user = updated, notificationSent });

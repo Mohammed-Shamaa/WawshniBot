@@ -445,6 +445,8 @@ public sealed class MessageHandler(
                 { await SafeReply(chatId, $"الاستخدام: {command} <telegram_user_id>", reply, cancellationToken); return true; }
                 if (targetId == adminId)
                 { await SafeReply(chatId, "لا يمكن تغيير صلاحية مسؤول البوت.", reply, cancellationToken); return true; }
+                var current = await users.GetByTelegramIdAsync(targetId, cancellationToken);
+                var wasReapproval = command == "/approve" && current?.Status == TelegramRegistrationStatus.Rejected;
                 var targetStatus = command == "/approve" ? TelegramRegistrationStatus.Approved : TelegramRegistrationStatus.Rejected;
                 IReadOnlyCollection<TelegramRegistrationStatus> allowed = command switch
                 {
@@ -455,14 +457,13 @@ public sealed class MessageHandler(
                 var updated = await users.SetStatusAsync(targetId, targetStatus, adminId, allowed, cancellationToken);
                 if (updated is null)
                 {
-                    var current = await users.GetByTelegramIdAsync(targetId, cancellationToken);
                     await SafeReply(chatId, current is null ? "لا يوجد طلب مسجل لهذا المعرّف." : command == "/reject" && current.Status == TelegramRegistrationStatus.Approved
                         ? "هذا المستخدم معتمد؛ إذا أردت سحب اعتماده استخدم /revoke <telegram_user_id>."
                         : $"لم يتغير الوضع؛ الحالة الحالية: {StatusArabic(current.Status)}.", reply, cancellationToken);
                     return true;
                 }
                 await SafeReply(chatId, command == "/revoke" ? "تم سحب صلاحية المستخدم. بقيت جلسة Moodle المشفرة محفوظة لكنها لن تستخدم ما دام الحساب غير معتمد." : targetStatus == TelegramRegistrationStatus.Approved ? "تم اعتماد المستخدم." : "تم رفض المستخدم أو إلغاء اعتماده.", reply, cancellationToken);
-                await NotifyApplicantAsync(updated, reply, cancellationToken);
+                await NotifyApplicantAsync(updated, reply, cancellationToken, wasReapproval);
                 return true;
             default:
                 break;
@@ -590,10 +591,12 @@ public sealed class MessageHandler(
         TelegramRegistrationStatus.Pending => "قيد المراجعة", TelegramRegistrationStatus.Approved => "معتمد", _ => "مرفوض/مسحوب الاعتماد"
     };
 
-    private async Task NotifyApplicantAsync(TelegramUserRegistration registration, Func<long, string, CancellationToken, Task> reply, CancellationToken cancellationToken)
+    private async Task NotifyApplicantAsync(TelegramUserRegistration registration, Func<long, string, CancellationToken, Task> reply, CancellationToken cancellationToken, bool wasReapproval = false)
     {
         var message = registration.Status == TelegramRegistrationStatus.Approved
-            ? "🎉 يا أهلاً وسهلاً فيك! صار حسابك معتمد، ونوّرت عيلة وشوشني 💛\nكنت مستنيك لدرجة إني جهّزت القهوة وفتحت الدفاتر 😄📚\n\nهسا بتقدر تربط حسابك الجامعي من Moodle. أرسل /link ونبدأ!"
+            ? wasReapproval
+                ? AccessNotificationMessages.Reapproved
+                : "🎉 يا أهلاً وسهلاً فيك! صار حسابك معتمد، ونوّرت عيلة وشوشني 💛\nكنت مستنيك لدرجة إني جهّزت القهوة وفتحت الدفاتر 😄📚\n\nهسا بتقدر تربط حسابك الجامعي من Moodle. أرسل /link ونبدأ!"
             : RejectedAccessNotice;
         try { await reply(registration.TelegramUserId, message, cancellationToken); }
         catch (Exception exception) when (exception is not OperationCanceledException)
