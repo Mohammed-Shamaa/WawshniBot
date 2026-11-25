@@ -99,12 +99,14 @@ public static class AdminDashboardEndpoints
             if (current is null) return Results.NotFound();
             var allowed = current.Status switch
             {
-                TelegramRegistrationStatus.Pending => new[] { TelegramRegistrationStatus.Pending },
-                TelegramRegistrationStatus.Approved => new[] { TelegramRegistrationStatus.Approved },
-                TelegramRegistrationStatus.Rejected => new[] { TelegramRegistrationStatus.Rejected },
+                TelegramRegistrationStatus.Pending when target is TelegramRegistrationStatus.Approved or TelegramRegistrationStatus.Rejected
+                    => new[] { TelegramRegistrationStatus.Pending },
+                TelegramRegistrationStatus.Rejected when target == TelegramRegistrationStatus.Approved
+                    => new[] { TelegramRegistrationStatus.Rejected },
                 _ => []
             };
-            if (!TelegramRegistrationPolicy.CanTransition(current.Status, target)) return Results.Conflict(new { error = "transition_not_allowed" });
+            if (allowed.Length == 0 || !TelegramRegistrationPolicy.CanTransition(current.Status, target))
+                return Results.Conflict(new { error = "transition_not_allowed" });
             var updated = await users.SetStatusAsync(userId, target, null, allowed, cancellationToken,
                 SafeReason(request.Reason), actor.Identity?.Name);
             if (updated is null) return Results.Conflict(new { error = "state_changed" });
@@ -112,6 +114,19 @@ public static class AdminDashboardEndpoints
                 ? "🎉 تمت الموافقة على طلبك. أصبح بإمكانك استخدام وشوشني. أرسل /link لربط Moodle."
                 : "تم تحديث حالة حسابك إلى غير معتمد. تواصل مع مسؤول وشوشني إذا كنت ترى أن ذلك غير صحيح.";
             var notificationSent = await NotifySafelyAsync(bot, userId, message, loggerFactory, cancellationToken);
+            return Results.Ok(new { user = updated, notificationSent });
+        });
+        api.MapPost("/users/{userId:long}/revoke", async (long userId, DashboardStatusRequest request, ClaimsPrincipal actor,
+            TelegramUserRepository users, TelegramBotService bot, ILoggerFactory loggerFactory, HttpContext context, IAntiforgery antiforgery,
+            CancellationToken cancellationToken) =>
+        {
+            if (!await HasValidCsrfAsync(context, antiforgery)) return Results.BadRequest(new { error = "csrf" });
+            var updated = await users.SetStatusAsync(userId, TelegramRegistrationStatus.Rejected, null,
+                [TelegramRegistrationStatus.Approved], cancellationToken, SafeReason(request.Reason), actor.Identity?.Name);
+            if (updated is null) return Results.Conflict(new { error = "user_missing_or_not_approved" });
+            var notificationSent = await NotifySafelyAsync(bot, userId,
+                "تم سحب اعتماد حسابك، لذلك لم يعد بإمكانك استخدام البوت. تواصل مع مسؤول وشوشني إذا كنت ترى أن ذلك غير صحيح.",
+                loggerFactory, cancellationToken);
             return Results.Ok(new { user = updated, notificationSent });
         });
         api.MapPost("/users/{userId:long}/block", async (long userId, DashboardBlockRequest request, ClaimsPrincipal actor,

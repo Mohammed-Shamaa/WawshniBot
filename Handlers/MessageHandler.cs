@@ -414,13 +414,13 @@ public sealed class MessageHandler(
         switch (command)
         {
             case "/start":
-                await SafeReply(chatId, "أهلاً بك في وشوشني.\n/help لعرض الأوامر\n/admin لفتح لوحة الإدارة\n/pending_users لطلبات الانضمام\n/users لإحصاءات المستخدمين\n/approve <id> أو /reject <id> أو /revoke <id> لإدارة الصلاحيات.", reply, cancellationToken);
+                await SafeReply(chatId, "أهلاً بك في وشوشني.\n/help لعرض الأوامر\n/admin لفتح لوحة الإدارة\n/pending_users لطلبات الانضمام\n/users لإحصاءات المستخدمين\n/approve <id> أو /reject <id> للطلبات، و/revoke <id> لسحب اعتماد مستخدم معتمد.", reply, cancellationToken);
                 return true;
             case "/admin":
                 await SafeReply(chatId, "لوحة إدارة وشوشني: https://wawshnibot.onrender.com/admin\nسجّل الدخول باسم المستخدم وكلمة المرور اللذين أعددتهما في إعدادات Render.", reply, cancellationToken);
                 return true;
             case "/help":
-                await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/admin — فتح لوحة الإدارة\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — اختيار مساق لعرض الواجبات\n/my_exams — اختيار مساق لعرض الاختبارات\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول أو إعادة قبول\n/reject <telegram_user_id> — رفض أو إلغاء اعتماد\n/revoke <telegram_user_id> — سحب اعتماد مستخدم\n\nاكتب سؤالك مباشرة للمساعد. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل إلى خدمة المساعد. ", reply, cancellationToken);
+                await SafeReply(chatId, "أوامر المسؤول:\n/start — ترحيب\n/admin — فتح لوحة الإدارة\n/link — ربط Moodle\n/status — حالة الربط\n/my_courses — المساقات\n/my_assignments — اختيار مساق لعرض الواجبات\n/my_exams — اختيار مساق لعرض الاختبارات\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل Moodle\n/pending_users — الطلبات المعلقة\n/users — إحصاءات المستخدمين\n/approve <telegram_user_id> — قبول طلب معلق أو إعادة اعتماد مرفوض\n/reject <telegram_user_id> — رفض طلب معلق فقط\n/revoke <telegram_user_id> — سحب اعتماد مستخدم معتمد\n\nاكتب سؤالك مباشرة للمساعد. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل إلى خدمة المساعد. ", reply, cancellationToken);
                 return true;
             case "/pending_users":
                 var pending = await users.GetPendingAsync(cancellationToken);
@@ -448,14 +448,16 @@ public sealed class MessageHandler(
                 IReadOnlyCollection<TelegramRegistrationStatus> allowed = command switch
                 {
                     "/approve" => [TelegramRegistrationStatus.Pending, TelegramRegistrationStatus.Rejected],
-                    "/reject" => [TelegramRegistrationStatus.Pending, TelegramRegistrationStatus.Approved],
+                    "/reject" => [TelegramRegistrationStatus.Pending],
                     _ => [TelegramRegistrationStatus.Approved]
                 };
                 var updated = await users.SetStatusAsync(targetId, targetStatus, adminId, allowed, cancellationToken);
                 if (updated is null)
                 {
                     var current = await users.GetByTelegramIdAsync(targetId, cancellationToken);
-                    await SafeReply(chatId, current is null ? "لا يوجد طلب مسجل لهذا المعرّف." : $"لم يتغير الوضع؛ الحالة الحالية: {StatusArabic(current.Status)}.", reply, cancellationToken);
+                    await SafeReply(chatId, current is null ? "لا يوجد طلب مسجل لهذا المعرّف." : command == "/reject" && current.Status == TelegramRegistrationStatus.Approved
+                        ? "هذا المستخدم معتمد؛ إذا أردت سحب اعتماده استخدم /revoke <telegram_user_id>."
+                        : $"لم يتغير الوضع؛ الحالة الحالية: {StatusArabic(current.Status)}.", reply, cancellationToken);
                     return true;
                 }
                 await SafeReply(chatId, command == "/revoke" ? "تم سحب صلاحية المستخدم. بقيت جلسة Moodle المشفرة محفوظة لكنها لن تستخدم ما دام الحساب غير معتمد." : targetStatus == TelegramRegistrationStatus.Approved ? "تم اعتماد المستخدم." : "تم رفض المستخدم أو إلغاء اعتماده.", reply, cancellationToken);
