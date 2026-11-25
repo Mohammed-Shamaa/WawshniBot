@@ -51,6 +51,7 @@ The GitHub repository root is the project root. Create a Docker Web Service from
 - `KeepAlive__IntervalMinutes=10` (optional; clamped to 5–14 minutes)
 - `Dashboard__Username` = a private dashboard login name
 - `Dashboard__PasswordHash` = a PBKDF2-SHA256 password hash; never store the plain password in Render
+- `DataProtection__KeyEncryptionKey` = Base64 encoding of 32 random bytes (for example, `openssl rand -base64 32`); required to encrypt the persistent ASP.NET cookie key ring stored in Neon
 
 Render supplies `PORT`; the app binds to `0.0.0.0` on that port. Verify the deployment with `/health` (liveness) and `/health/ready` (database connection). The readiness response never includes a connection string or exception details.
 
@@ -78,7 +79,7 @@ try {
 }
 ```
 
-Paste the generated line into `Dashboard__PasswordHash`. The dashboard includes overview statistics, search/filter/sort/pagination, dedicated registration and block-status views, user details, actions, audit history, and safe service status. Database schema changes are additive and applied at startup; `Users/002_admin_dashboard.sql` documents the same changes. Existing user records, registration status, and encrypted Moodle sessions are retained. Administrative status and block changes are transactional and audited; Telegram notification failure does not undo a saved change. Dashboard sign-in is rate-limited, uses HTTP-only Secure/SameSite cookies, and requires antiforgery tokens for mutations. No dashboard secret is sent to browser code.
+Paste the generated line into `Dashboard__PasswordHash`. The dashboard includes overview statistics, search/filter/sort/pagination, dedicated registration and block-status views, user details, actions, audit history, and safe service status. Database schema changes are additive and applied at startup; `Users/002_admin_dashboard.sql` documents the same changes. Existing user records, registration status, and encrypted Moodle sessions are retained. Administrative status and block changes are transactional and audited; Telegram notification failure does not undo a saved change. Dashboard sign-in is rate-limited, uses HTTP-only Secure/SameSite cookies, and requires antiforgery tokens for mutations. No dashboard secret is sent to browser code. ASP.NET cookie keys are encrypted and persisted in Neon so Render restarts and deployments do not invalidate sessions; the login cookie lasts 30 days and slides while you use the dashboard. Sign in once again after the deployment that first enables persistent keys.
 
 ## Telegram commands
 

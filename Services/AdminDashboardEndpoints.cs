@@ -36,7 +36,7 @@ public static class AdminDashboardEndpoints
                 [new Claim(ClaimTypes.Name, configuredUser), new Claim(ClaimTypes.Role, "Administrator")],
                 CookieAuthenticationDefaults.AuthenticationScheme));
             await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, principal,
-                new AuthenticationProperties { IsPersistent = true, AllowRefresh = true, ExpiresUtc = DateTimeOffset.UtcNow.AddHours(12) });
+                new AuthenticationProperties { IsPersistent = true, AllowRefresh = true, ExpiresUtc = DateTimeOffset.UtcNow.AddDays(30) });
             return Results.Ok(new { username = configuredUser });
         }).RequireRateLimiting("dashboard-login");
 

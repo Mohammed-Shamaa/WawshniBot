@@ -9,6 +9,10 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
+using Microsoft.AspNetCore.DataProtection.Repositories;
+using Microsoft.AspNetCore.DataProtection.XmlEncryption;
 using System.Threading.RateLimiting;
 using System.Text.Json.Serialization;
 
@@ -27,6 +31,19 @@ builder.Services.AddOptions<MoodleOptions>()
 builder.Services.AddOptions<GoogleAiOptions>()
     .Bind(builder.Configuration.GetSection(GoogleAiOptions.SectionName));
 builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+builder.Services.AddDataProtection().SetApplicationName("WawshniBot");
+if (!builder.Environment.IsDevelopment())
+{
+    builder.Services.AddSingleton<NeonDataProtectionXmlRepository>();
+    builder.Services.AddSingleton<IXmlRepository>(services => services.GetRequiredService<NeonDataProtectionXmlRepository>());
+    builder.Services.AddSingleton<IXmlEncryptor, NeonDataProtectionXmlEncryptor>();
+    builder.Services.AddOptions<KeyManagementOptions>()
+        .Configure<IXmlRepository, IXmlEncryptor>((options, repository, encryptor) =>
+        {
+            options.XmlRepository = repository;
+            options.XmlEncryptor = encryptor;
+        });
+}
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
 {
     options.Cookie.Name = "Wawshni.Admin";
@@ -34,7 +51,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
     options.Cookie.SameSite = SameSiteMode.Strict;
     options.SlidingExpiration = true;
-    options.ExpireTimeSpan = TimeSpan.FromHours(12);
+    options.ExpireTimeSpan = TimeSpan.FromDays(30);
     options.Events.OnRedirectToLogin = context =>
     {
         if (context.Request.Path.StartsWithSegments("/admin/api")) { context.Response.StatusCode = StatusCodes.Status401Unauthorized; return Task.CompletedTask; }
@@ -87,6 +104,9 @@ await app.Services.GetRequiredService<MoodleSessionRepository>()
     .EnsureSchemaAsync(app.Lifetime.ApplicationStopping);
 if (!app.Environment.IsDevelopment())
 {
+    await app.Services.GetRequiredService<NeonDataProtectionXmlRepository>()
+        .EnsureSchemaAsync(app.Lifetime.ApplicationStopping);
+    _ = app.Services.GetRequiredService<IXmlEncryptor>(); // Fail startup if the persistent key-encryption secret is missing or invalid.
     var forwardedHeaders = new ForwardedHeadersOptions
     {
         ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
