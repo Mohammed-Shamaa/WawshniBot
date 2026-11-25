@@ -21,7 +21,9 @@ public sealed class MessageHandler(
     ILogger<MessageHandler> logger)
 {
     private const long MaxImageBytes = 10 * 1024 * 1024;
+    private const long MaxAudioBytes = 10 * 1024 * 1024;
     private const string ImageAnalysisHelp = "ابعت صورة واسألني عنها، وبحللها لك. الصور تُرسل لخدمة Gemini للتحليل؛ تجنب إرسال صور حساسة أو خاصة.";
+    private const string VoiceHelp = "ابعتلي رسالة صوتية، بفهمها وبرد عليك بشكل طبيعي 🎙️ الصوت يُرسل لخدمة المساعد لتفريغه؛ تجنب إرسال معلومات حساسة.";
     private const string RejectedAccessNotice = "هههههههههههههههههههههههههههههههه يا هلفوت فش استخدام للبوت بكفي , روح افتح المودل\nحسابك حالياً غير معتمد لاستخدام وشوشني ارسل /my_access لمعرفة الحالة، وإذا عندك استفسار أو بتعتقد أنه صار خطأ، تواصل مع المهندس محمد: mohammedmomen177@gmail.com";
     private readonly ConcurrentDictionary<long, LinkFlow> _flows = new();
     private readonly ConcurrentDictionary<long, AssignmentCoursePicker> _assignmentCoursePickers = new();
@@ -38,6 +40,7 @@ public sealed class MessageHandler(
     {
         if (message.From is null || message.Chat is null) return;
         var imageAttachment = GetImageAttachment(message);
+        var audioAttachment = GetAudioAttachment(message);
         var userId = message.From.Id;
         if (await authorization.IsBlockedAsync(userId, cancellationToken))
         {
@@ -49,7 +52,7 @@ public sealed class MessageHandler(
         catch (Exception exception) when (exception is not OperationCanceledException)
         { logger.LogDebug("Could not update dashboard last-activity time ({ExceptionType}).", exception.GetType().Name); }
         var isAdmin = await authorization.IsAdminAsync(userId, cancellationToken);
-        if (string.IsNullOrWhiteSpace(message.Text) && imageAttachment is null)
+        if (string.IsNullOrWhiteSpace(message.Text) && imageAttachment is null && audioAttachment is null)
         {
             if (!isAdmin)
             {
@@ -116,7 +119,7 @@ public sealed class MessageHandler(
         if (command == "/help")
         {
             var help = registrationStatus == TelegramRegistrationStatus.Approved
-                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام\n\nوتقدر تطلبها بطريقتك، مثل «بدي أربط Moodle»، «ورجيني واجباتي»، أو «شو امتحاناتي؟». " + ImageAnalysisHelp + "\nللأسئلة العادية، اكتب سؤالك مباشرة. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل رسائلك إلى خدمة المساعد لتوليد الرد."
+                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام\n\nوتقدر تطلبها بطريقتك، مثل «بدي أربط Moodle»، «ورجيني واجباتي»، أو «شو امتحاناتي؟». " + ImageAnalysisHelp + " " + VoiceHelp + "\nللأسئلة العادية، اكتب أو أرسل سؤالك مباشرة. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل رسائلك إلى خدمة المساعد لتوليد الرد."
                 : "يمكنك استخدام /my_access لمعرفة حالة طلبك. لإرسال طلب انضمام أو إعادة عرضه أرسل /start.";
             await SafeReply(message.Chat.Id, help, reply, cancellationToken);
             return;
@@ -141,6 +144,18 @@ public sealed class MessageHandler(
             }
             await HandleImageAsync(message, imageAttachment, downloadImage, reply, cancellationToken);
             return;
+        }
+        if (audioAttachment is not null)
+        {
+            if (_flows.ContainsKey(userId))
+            {
+                await SafeReply(message.Chat.Id, "خلّينا نكمّل ربط Moodle بالرسائل النصية فقط؛ أرسل الرقم أو كلمة المرور كنص، أو /cancel لإلغاء الربط.", reply, cancellationToken);
+                return;
+            }
+            var transcript = await TranscribeVoiceAsync(message, audioAttachment, downloadImage, reply, cancellationToken);
+            if (transcript is null) return;
+            messageText = transcript;
+            command = messageText.Split(' ', 2)[0].Split('@', 2)[0].ToLowerInvariant();
         }
         if (!_flows.ContainsKey(userId) && !command.StartsWith('/')
             && NaturalLanguageCommandRouter.MapToCommand(messageText) is { } routedCommand)
@@ -408,6 +423,79 @@ public sealed class MessageHandler(
             return new ImageAttachment(document.FileId, mimeType.ToLowerInvariant(), document.FileSize);
         return null;
     }
+
+    private async Task<string?> TranscribeVoiceAsync(Message message, AudioAttachment attachment,
+        Func<string, long, CancellationToken, Task<byte[]>> downloadFile,
+        Func<long, string, CancellationToken, Task> reply, CancellationToken cancellationToken)
+    {
+        if (!IsSupportedAudioMimeType(attachment.MimeType))
+        {
+            await SafeReply(message.Chat!.Id, "صيغة هالصوت مش مدعومة حالياً. ابعت Voice من Telegram أو ملفاً بصيغة OGG/Opus أو MP3 أو WAV أو M4A.", reply, cancellationToken);
+            return null;
+        }
+        if (attachment.FileSize is > MaxAudioBytes)
+        {
+            await SafeReply(message.Chat!.Id, "الصوت طويل/كبير عليّ شوي 😅 ابعت تسجيلاً أصغر من 10 ميغابايت.", reply, cancellationToken);
+            return null;
+        }
+
+        var audioBytes = Array.Empty<byte>();
+        try
+        {
+            audioBytes = await downloadFile(attachment.FileId, MaxAudioBytes, cancellationToken);
+            if (audioBytes.Length == 0)
+            {
+                await SafeReply(message.Chat!.Id, "ما وصلني محتوى الصوت بشكل سليم. جرّب تبعته مرة ثانية.", reply, cancellationToken);
+                return null;
+            }
+            if (audioBytes.LongLength > MaxAudioBytes)
+            {
+                await SafeReply(message.Chat!.Id, "الصوت طويل/كبير عليّ شوي 😅 ابعت تسجيلاً أصغر من 10 ميغابايت.", reply, cancellationToken);
+                return null;
+            }
+
+            await SafeReply(message.Chat!.Id, "🎧 وصلتني، خليني أسمعك...", reply, cancellationToken);
+            var result = await geminiChat.TranscribeAudioAsync(message.From!.Id, audioBytes, attachment.MimeType, cancellationToken);
+            if (result.Kind != GeminiReplyKind.Success || string.IsNullOrWhiteSpace(result.Text))
+            {
+                await SafeReply(message.Chat!.Id, result.Text, reply, cancellationToken);
+                return null;
+            }
+            return result.Text.Trim();
+        }
+        catch (InvalidDataException)
+        {
+            await SafeReply(message.Chat!.Id, "الصوت كبير 😅 ابعت تسجيلاً أصغر من 10 ميغابايت.", reply, cancellationToken);
+            return null;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning("Telegram voice transcription failed ({ExceptionType}); audio content and identifiers omitted.", exception.GetType().Name);
+            await SafeReply(message.Chat!.Id, "تعذر استلام الصوت أو فهمه حالياً. جرّب تبعته مرة ثانية بعد قليل.", reply, cancellationToken);
+            return null;
+        }
+        finally
+        {
+            if (audioBytes.Length > 0) CryptographicOperations.ZeroMemory(audioBytes);
+        }
+    }
+
+    private static AudioAttachment? GetAudioAttachment(Message message)
+    {
+        if (message.Voice is { } voice)
+            return new AudioAttachment(voice.FileId, NormalizeAudioMimeType(voice.MimeType, "audio/ogg"), voice.FileSize);
+        if (message.Audio is { } audio)
+            return new AudioAttachment(audio.FileId, NormalizeAudioMimeType(audio.MimeType, "audio/mpeg"), audio.FileSize);
+        if (message.Document is { MimeType: { } mimeType } document && mimeType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
+            return new AudioAttachment(document.FileId, NormalizeAudioMimeType(mimeType, "audio/ogg"), document.FileSize);
+        return null;
+    }
+
+    private static string NormalizeAudioMimeType(string? mimeType, string fallback) =>
+        string.IsNullOrWhiteSpace(mimeType) ? fallback : mimeType.Split(';', 2)[0].Trim().ToLowerInvariant();
+
+    private static bool IsSupportedAudioMimeType(string mimeType) => mimeType is
+        "audio/ogg" or "audio/opus" or "audio/mpeg" or "audio/mp3" or "audio/wav" or "audio/aac" or "audio/aiff" or "audio/flac" or "audio/m4a" or "audio/webm";
 
     private static bool IsSupportedImageMimeType(string mimeType) => mimeType is
         "image/jpeg" or "image/png" or "image/webp" or "image/heic" or "image/heif";
@@ -743,5 +831,6 @@ public sealed class MessageHandler(
     private enum LinkStep { StudentId, Password }
     private sealed record LinkFlow(LinkStep Step, string? StudentId, DateTimeOffset StartedAt);
     private sealed record ImageAttachment(string FileId, string MimeType, long? FileSize);
+    private sealed record AudioAttachment(string FileId, string MimeType, long? FileSize);
     private sealed record AssignmentCoursePicker(Guid RequestId, IReadOnlyDictionary<int, string> Courses, DateTimeOffset ExpiresAt);
 }

@@ -24,7 +24,7 @@ public sealed class GeminiChatService(
     private readonly ConcurrentDictionary<long, Conversation> _conversations = new();
 
     private const string SystemInstruction = """
-        You are وشوشني (WawshniBot), a charming, funny, emotionally intelligent conversation partner and academic helper. Your Arabic spoken/display name is exactly "وشوشني". Never call yourself "واوشني" or "Wawshni" when answering in Arabic. If asked your name in Arabic, answer naturally: "أنا وشوشني! 🙋‍♂️ صاحبك ورفيقك بالدراسة والدردشة." Sound like a real, warm person: lively, kind, attentive, and easy to talk to. Pick up the user's mood and conversational cues, respond directly to what they said, and keep a natural back-and-forth rather than turning every message into a lecture. Use light, clever humor when it fits; never force jokes, mock the user, or joke during serious or sensitive moments. When the user sends an image, analyze only what is visible, answer their caption if provided, and do not identify a person or infer sensitive traits.
+        You are وشوشني (WawshniBot), a charming, funny, emotionally intelligent conversation partner and academic helper. Your Arabic spoken/display name is exactly "وشوشني". Never call yourself "واوشني" or "Wawshni" when answering in Arabic. If asked your name in Arabic, answer naturally: "أنا وشوشني! 🙋‍♂️ صاحبك ورفيقك بالدراسة والدردشة." Sound like a real, warm person: lively, kind, attentive, and easy to talk to. Pick up the user's mood and conversational cues, respond directly to what they said, and keep a natural back-and-forth rather than turning every message into a lecture. Use light, clever humor when it fits; never force jokes, mock the user, or joke during serious or sensitive moments. When the user sends an image, analyze only what is visible, answer their caption if provided, and do not identify a person or infer sensitive traits. When the user sends a voice message, respond to its transcribed meaning naturally and in the same language; never claim to have heard details that were not transcribed.
 
         If asked who owns, administers, or developed you, say that engineer Mohammed is your developer/administrator and share his contact email: mohammedmomen177@gmail.com. In Arabic, phrase it naturally, for example: "أنا وشوشني، مطوّري والمهندس المسؤول عني محمد. بتقدر تتواصل معه على mohammedmomen177@gmail.com." In English, identify Mohammed as your developer and give the same email. Do not claim that you are the owner or developer yourself.
 
@@ -46,7 +46,16 @@ public sealed class GeminiChatService(
         return ReplyCoreAsync(telegramUserId, userText, imagePart, cancellationToken);
     }
 
-    private async Task<GeminiReply> ReplyCoreAsync(long telegramUserId, string userText, GeminiPart? imagePart, CancellationToken cancellationToken)
+    public Task<GeminiReply> TranscribeAudioAsync(long telegramUserId, byte[] audioBytes, string mimeType, CancellationToken cancellationToken)
+    {
+        var audioPart = new GeminiPart(null, new GeminiInlineData(mimeType, Convert.ToBase64String(audioBytes)));
+        const string transcriptionInstruction = "You are a speech transcription engine. Transcribe the attached audio accurately in its original language, preserving Arabic dialect and English words. Return only the spoken words, with no labels, explanations, translation, or reply. If there is no intelligible speech, return an empty response.";
+        return ReplyCoreAsync(telegramUserId, "Transcribe the attached voice message.", audioPart, cancellationToken,
+            transcriptionInstruction, includeHistory: false, storeInHistory: false);
+    }
+
+    private async Task<GeminiReply> ReplyCoreAsync(long telegramUserId, string userText, GeminiPart? imagePart, CancellationToken cancellationToken,
+        string? instruction = null, bool includeHistory = true, bool storeInHistory = true)
     {
         var settings = options.Value;
         if (!settings.Enabled) return new(GeminiReplyKind.Disabled, "المساعد الذكي غير مفعّل حالياً.");
@@ -69,12 +78,14 @@ public sealed class GeminiChatService(
             if (DateTimeOffset.UtcNow - conversation.LastActivity > HistoryLifetime) conversation.Messages.Clear();
             var userParts = new List<GeminiPart> { new(userText) };
             if (imagePart is not null) userParts.Add(imagePart);
-            var contents = conversation.Messages
-                .Select(message => new GeminiContent(message.Role, [new GeminiPart(message.Text)]))
+            var history = includeHistory
+                ? conversation.Messages.Select(message => new GeminiContent(message.Role, [new GeminiPart(message.Text)]))
+                : Enumerable.Empty<GeminiContent>();
+            var contents = history
                 .Append(new GeminiContent("user", userParts.ToArray()))
                 .ToArray();
             var payload = new GeminiRequest(
-                new GeminiInstruction([new GeminiPart(SystemInstruction)]), contents,
+                new GeminiInstruction([new GeminiPart(instruction ?? SystemInstruction)]), contents,
                 new GeminiGenerationConfig(1200));
             var selectedModel = model;
             HttpResponseMessage response;
@@ -128,11 +139,14 @@ public sealed class GeminiChatService(
                 return new(GeminiReplyKind.Unavailable, "لم أتمكن من صياغة رد مناسب على الرسالة. أعد صياغة سؤالك من فضلك.");
             }
 
-            conversation.Messages.Add(new("user", userText));
-            conversation.Messages.Add(new("model", answer));
-            if (conversation.Messages.Count > MaxHistoryMessages)
-                conversation.Messages.RemoveRange(0, conversation.Messages.Count - MaxHistoryMessages);
-            conversation.LastActivity = DateTimeOffset.UtcNow;
+            if (storeInHistory)
+            {
+                conversation.Messages.Add(new("user", userText));
+                conversation.Messages.Add(new("model", answer));
+                if (conversation.Messages.Count > MaxHistoryMessages)
+                    conversation.Messages.RemoveRange(0, conversation.Messages.Count - MaxHistoryMessages);
+                conversation.LastActivity = DateTimeOffset.UtcNow;
+            }
             return new(GeminiReplyKind.Success, answer);
             }
         }
