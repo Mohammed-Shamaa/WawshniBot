@@ -19,6 +19,7 @@ public sealed class MessageHandler(
     MoodleSessionRepository sessions,
     ILogger<MessageHandler> logger)
 {
+    private const string RejectedAccessNotice = "حسابك حالياً غير معتمد لاستخدام وشوشني 😅 يبدو أن بطاقة الدخول أخذت استراحة قصيرة.\nأرسل /my_access لمعرفة الحالة، وإذا عندك استفسار أو بتعتقد أنه صار خطأ، تواصل مع المهندس محمد: mohammedmomen177@gmail.com";
     private readonly ConcurrentDictionary<long, LinkFlow> _flows = new();
     private readonly ConcurrentDictionary<long, AssignmentCoursePicker> _assignmentCoursePickers = new();
     private readonly ConcurrentDictionary<long, AssignmentCoursePicker> _examCoursePickers = new();
@@ -53,7 +54,7 @@ public sealed class MessageHandler(
                     : status == TelegramRegistrationStatus.Pending
                         ? "طلبك قيد مراجعة المسؤول. أرسل /my_access لمعرفة الحالة."
                         : status == TelegramRegistrationStatus.Rejected
-                            ? "حسابك غير معتمد لاستخدام وشوشني. أرسل /my_access لمعرفة الحالة."
+                            ? RejectedAccessNotice
                             : "أرسل /help لعرض الأوامر المتاحة.", reply, cancellationToken);
             }
             return;
@@ -96,7 +97,7 @@ public sealed class MessageHandler(
                     await SafeReply(message.Chat.Id, "أهلاً بك في وشوشني. أرسل /link لربط حساب Moodle، أو /help لعرض الأوامر.", reply, cancellationToken);
                     return;
                 case TelegramRegistrationStatus.Rejected:
-                    await SafeReply(message.Chat.Id, "نعتذر، لم تتم الموافقة على طلب انضمامك إلى وشوشني. إذا كنت تعتقد أن هذا القرار صدر بالخطأ، يرجى التواصل مع مسؤول البوت.", reply, cancellationToken);
+                    await SafeReply(message.Chat.Id, RejectedAccessNotice, reply, cancellationToken);
                     return;
             }
         }
@@ -122,7 +123,7 @@ public sealed class MessageHandler(
                 ? "لإنشاء طلب انضمامك إلى وشوشني، أرسل /start أولاً."
                 : registrationStatus == TelegramRegistrationStatus.Pending
                     ? "طلبك قيد مراجعة المسؤول. أرسل /my_access لمعرفة الحالة."
-                    : "حسابك غير معتمد لاستخدام وشوشني. أرسل /my_access لمعرفة الحالة.";
+                    : RejectedAccessNotice;
             await SafeReply(message.Chat.Id, notice, reply, cancellationToken);
             return;
         }
@@ -461,7 +462,7 @@ public sealed class MessageHandler(
                     return true;
                 }
                 await SafeReply(chatId, command == "/revoke" ? "تم سحب صلاحية المستخدم. بقيت جلسة Moodle المشفرة محفوظة لكنها لن تستخدم ما دام الحساب غير معتمد." : targetStatus == TelegramRegistrationStatus.Approved ? "تم اعتماد المستخدم." : "تم رفض المستخدم أو إلغاء اعتماده.", reply, cancellationToken);
-                await NotifyApplicantAsync(updated, reply, cancellationToken);
+                await NotifyApplicantAsync(updated, reply, cancellationToken, command == "/revoke");
                 return true;
             default:
                 break;
@@ -478,7 +479,7 @@ public sealed class MessageHandler(
     {
         TelegramRegistrationStatus.Pending => "طلبك قيد مراجعة المسؤول.",
         TelegramRegistrationStatus.Approved => "حسابك معتمد، ويمكنك استخدام خدمات وشوشني.",
-        TelegramRegistrationStatus.Rejected => "حسابك غير معتمد لاستخدام وشوشني.",
+        TelegramRegistrationStatus.Rejected => RejectedAccessNotice,
         _ => "لا يوجد طلب انضمام مسجل. أرسل /start لإنشاء طلب."
     };
 
@@ -589,11 +590,13 @@ public sealed class MessageHandler(
         TelegramRegistrationStatus.Pending => "قيد المراجعة", TelegramRegistrationStatus.Approved => "معتمد", _ => "مرفوض/مسحوب الاعتماد"
     };
 
-    private async Task NotifyApplicantAsync(TelegramUserRegistration registration, Func<long, string, CancellationToken, Task> reply, CancellationToken cancellationToken)
+    private async Task NotifyApplicantAsync(TelegramUserRegistration registration, Func<long, string, CancellationToken, Task> reply, CancellationToken cancellationToken, bool revoked = false)
     {
         var message = registration.Status == TelegramRegistrationStatus.Approved
             ? "🎉 تمت الموافقة على طلب انضمامك إلى وشوشني!\n\nأصبح بإمكانك الآن ربط حسابك الجامعي من Moodle.\n\nأرسل /link للبدء."
-            : "نعتذر، لم تتم الموافقة على طلب انضمامك إلى وشوشني.\n\nإذا كنت تعتقد أن هذا القرار صدر بالخطأ، يرجى التواصل مع مسؤول البوت.";
+            : revoked
+                ? "تم سحب اعتماد حسابك لاستخدام وشوشني حالياً. يبدو أن بطاقة دخولك أخذت استراحة 😅\n\nأرسل /my_access لمعرفة الحالة، وللاستفسار أو مراجعة القرار تواصل مع المهندس محمد:\nmohammedmomen177@gmail.com"
+                : RejectedAccessNotice;
         try { await reply(registration.TelegramUserId, message, cancellationToken); }
         catch (Exception exception) when (exception is not OperationCanceledException)
         { logger.LogWarning("Could not notify Telegram user about access decision ({ExceptionType}); database status was saved.", exception.GetType().Name); }
