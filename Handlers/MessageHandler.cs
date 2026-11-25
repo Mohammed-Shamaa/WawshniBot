@@ -593,7 +593,7 @@ public sealed class MessageHandler(
     private async Task NotifyApplicantAsync(TelegramUserRegistration registration, Func<long, string, CancellationToken, Task> reply, CancellationToken cancellationToken)
     {
         var message = registration.Status == TelegramRegistrationStatus.Approved
-            ? "🎉 تمت الموافقة على طلب انضمامك إلى وشوشني!\n\nأصبح بإمكانك الآن ربط حسابك الجامعي من Moodle.\n\nأرسل /link للبدء."
+            ? "🎉 يا أهلاً وسهلاً فيك! صار حسابك معتمد، ونوّرت عيلة وشوشني 💛\nكنت مستنيك لدرجة إني جهّزت القهوة وفتحت الدفاتر 😄📚\n\nهسا بتقدر تربط حسابك الجامعي من Moodle. أرسل /link ونبدأ!"
             : RejectedAccessNotice;
         try { await reply(registration.TelegramUserId, message, cancellationToken); }
         catch (Exception exception) when (exception is not OperationCanceledException)
