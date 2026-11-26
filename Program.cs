@@ -30,6 +30,8 @@ builder.Services.AddOptions<MoodleOptions>()
     .ValidateOnStart();
 builder.Services.AddOptions<GoogleAiOptions>()
     .Bind(builder.Configuration.GetSection(GoogleAiOptions.SectionName));
+builder.Services.AddOptions<BotContactOptions>()
+    .Bind(builder.Configuration.GetSection(BotContactOptions.SectionName));
 builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddDataProtection().SetApplicationName("WawshniBot");
 if (!builder.Environment.IsDevelopment())

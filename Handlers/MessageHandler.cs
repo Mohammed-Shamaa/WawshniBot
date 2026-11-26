@@ -18,16 +18,19 @@ public sealed class MessageHandler(
     MoodleBrowserService moodleBrowser,
     GeminiChatService geminiChat,
     MoodleSessionRepository sessions,
+    IOptions<BotContactOptions> botContact,
     ILogger<MessageHandler> logger)
 {
     private const long MaxImageBytes = 10 * 1024 * 1024;
     private const long MaxAudioBytes = 10 * 1024 * 1024;
+    private const long MaxAssignmentFileBytes = 20 * 1024 * 1024;
     private const string ImageAnalysisHelp = "ابعت صورة واسألني عنها، وبحللها لك. الصور تُرسل لخدمة Gemini للتحليل؛ تجنب إرسال صور حساسة أو خاصة.";
     private const string VoiceHelp = "ابعتلي رسالة صوتية، بفهمها وبرد عليك بشكل طبيعي 🎙️ الصوت يُرسل لخدمة المساعد لتفريغه؛ تجنب إرسال معلومات حساسة.";
-    private const string RejectedAccessNotice = "هههههههههههههههههههههههههههههههه يا هلفوت فش استخدام للبوت بكفي , روح افتح المودل\nحسابك حالياً غير معتمد لاستخدام وشوشني ارسل /my_access لمعرفة الحالة، وإذا عندك استفسار أو بتعتقد أنه صار خطأ، تواصل مع المهندس محمد: mohammedmomen177@gmail.com";
+    private string RejectedAccessNotice => botContact.Value.RejectedAccessNotice;
     private readonly ConcurrentDictionary<long, LinkFlow> _flows = new();
     private readonly ConcurrentDictionary<long, AssignmentCoursePicker> _assignmentCoursePickers = new();
     private readonly ConcurrentDictionary<long, AssignmentCoursePicker> _examCoursePickers = new();
+    private readonly ConcurrentDictionary<long, AssignmentSubmissionFlow> _assignmentSubmissionFlows = new();
 
     public async Task HandleAsync(
         Message message,
@@ -52,7 +55,7 @@ public sealed class MessageHandler(
         catch (Exception exception) when (exception is not OperationCanceledException)
         { logger.LogDebug("Could not update dashboard last-activity time ({ExceptionType}).", exception.GetType().Name); }
         var isAdmin = await authorization.IsAdminAsync(userId, cancellationToken);
-        if (string.IsNullOrWhiteSpace(message.Text) && imageAttachment is null && audioAttachment is null)
+        if (string.IsNullOrWhiteSpace(message.Text) && imageAttachment is null && audioAttachment is null && message.Document is null)
         {
             if (!isAdmin)
             {
@@ -119,7 +122,7 @@ public sealed class MessageHandler(
         if (command == "/help")
         {
             var help = registrationStatus == TelegramRegistrationStatus.Approved
-                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام\n\nوتقدر تطلبها بطريقتك، مثل «بدي أربط Moodle»، «ورجيني واجباتي»، أو «شو امتحاناتي؟». " + ImageAnalysisHelp + " " + VoiceHelp + "\nللأسئلة العادية، اكتب أو أرسل سؤالك مباشرة. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل رسائلك إلى خدمة المساعد لتوليد الرد."
+                ? "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/submit_assignment — اختيار واجب ورفعه بعد تأكيدك\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n/my_access — حالة طلب الانضمام\n\nوتقدر تطلبها بطريقتك، مثل «بدي أربط Moodle»، «ورجيني واجباتي»، «بدي أسلّم واجب»، أو «شو امتحاناتي؟». " + ImageAnalysisHelp + " " + VoiceHelp + "\nللأسئلة العادية، اكتب أو أرسل سؤالك مباشرة. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل رسائلك إلى خدمة المساعد لتوليد الرد."
                 : "يمكنك استخدام /my_access لمعرفة حالة طلبك. لإرسال طلب انضمام أو إعادة عرضه أرسل /start.";
             await SafeReply(message.Chat.Id, help, reply, cancellationToken);
             return;
@@ -127,12 +130,19 @@ public sealed class MessageHandler(
         if (registrationStatus != TelegramRegistrationStatus.Approved)
         {
             _flows.TryRemove(userId, out _);
+            ClearAssignmentSubmissionFlow(userId);
             var notice = registrationStatus is null
                 ? "لإنشاء طلب انضمامك إلى وشوشني، أرسل /start أولاً."
                 : registrationStatus == TelegramRegistrationStatus.Pending
                     ? "طلبك قيد مراجعة المسؤول. أرسل /my_access لمعرفة الحالة."
                     : RejectedAccessNotice;
             await SafeReply(message.Chat.Id, notice, reply, cancellationToken);
+            return;
+        }
+        if (!command.StartsWith('/') && _assignmentSubmissionFlows.TryGetValue(userId, out var submissionFlow)
+            && submissionFlow.Step == AssignmentSubmissionStep.AwaitingContent)
+        {
+            await ReceiveAssignmentSubmissionContentAsync(message, submissionFlow, downloadImage, reply, coursePicker, cancellationToken);
             return;
         }
         if (imageAttachment is not null)
@@ -168,7 +178,26 @@ public sealed class MessageHandler(
             _flows.TryRemove(message.From.Id, out _);
             _assignmentCoursePickers.TryRemove(userId, out _);
             _examCoursePickers.TryRemove(userId, out _);
+            ClearAssignmentSubmissionFlow(userId);
             await SafeReply(message.Chat.Id, "تم إلغاء العملية الحالية.", reply, cancellationToken);
+            return;
+        }
+        if (command is "/submit_assignment" or "/submit_homework")
+        {
+            await SafeReply(message.Chat.Id, "⏳ جاري تحميل مساقاتك لاختيار الواجب...", reply, cancellationToken);
+            var courses = await moodleBrowser.GetAssignmentCoursesAsync(userId, cancellationToken);
+            if (!await authorization.IsApprovedAsync(userId, cancellationToken))
+            { await SafeReply(message.Chat.Id, "تغير اعتماد حسابك أثناء الطلب؛ لم أعرض بيانات Moodle.", reply, cancellationToken); return; }
+            if (courses.Kind is MoodleAssignmentsResultKind.Expired or MoodleAssignmentsResultKind.SessionRestoreFailed
+                or MoodleAssignmentsResultKind.Unavailable or MoodleAssignmentsResultKind.ExtractionFailed)
+            { await SafeReply(message.Chat.Id, FormatAssignmentCourseListError(courses.Kind), reply, cancellationToken); return; }
+            if (courses.Courses.Count == 0) { await SafeReply(message.Chat.Id, "لم أجد مساقات مسجلة في حساب Moodle.", reply, cancellationToken); return; }
+            var submissionRequest = Guid.NewGuid();
+            ClearAssignmentSubmissionFlow(userId);
+            _assignmentSubmissionFlows[userId] = new AssignmentSubmissionFlow(submissionRequest, AssignmentSubmissionStep.ChooseCourse,
+                courses.Courses.ToDictionary(c => c.Id, c => c.Name), [], null, null, null, null, null, null, null, null, null, DateTimeOffset.UtcNow.AddMinutes(15));
+            var choices = courses.Courses.Take(100).Select(c => (TruncateButtonLabel(c.Name), $"submitcourse:{submissionRequest:N}:{c.Id}")).ToArray();
+            await coursePicker(message.Chat.Id, "اختر المساق الذي يحتوي الواجب الذي تريد تسليمه:", choices, cancellationToken);
             return;
         }
         if (command == "/link" || command == "/connect_moodle")
@@ -180,6 +209,7 @@ public sealed class MessageHandler(
         if (command == "/logout")
         {
             _flows.TryRemove(message.From.Id, out _);
+            ClearAssignmentSubmissionFlow(userId);
             try
             {
                 await sessions.DeleteAsync(message.From.Id, cancellationToken);
@@ -328,7 +358,7 @@ public sealed class MessageHandler(
                 response = "أهلاً بك في وشوشني. أرسل /link لربط حساب Moodle، أو /help لعرض الأوامر.";
                 break;
             case "/help":
-                response = "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n\nاكتب سؤالك مباشرة للمساعد. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل إلى خدمة المساعد.";
+                response = "الأوامر المتاحة:\n/link — ربط حساب Moodle\n/status — حالة الربط\n/my_courses — مساقاتي الفعلية\n/my_assignments — اختر مساقاً لعرض واجباته ومواعيده\n/submit_assignment — اختيار واجب ورفعه بعد تأكيدك\n/my_exams — اختر مساقاً لعرض اختباراته\n/all_exams — عرض اختبارات جميع المساقات\n/reset_chat — مسح سياق المحادثة مع المساعد\n/logout — فصل الحساب وحذف الجلسة\n/cancel — إلغاء العملية الحالية\n\nاكتب سؤالك مباشرة للمساعد. لا ترسل كلمات مرور أو بيانات حساسة؛ تُرسل الرسائل إلى خدمة المساعد.";
                 break;
             case "/upcoming": response = "أرسل /link أولاً؛ استرجاع المواعيد غير متاح بعد."; break;
             case "/latest": response = "أرسل /link أولاً؛ لا توجد مزامنة للمستجدات بعد."; break;
@@ -505,6 +535,7 @@ public sealed class MessageHandler(
         Func<long, string, CancellationToken, Task> reply,
         Func<string, string, CancellationToken, Task> answer,
         Func<long, int, string, CancellationToken, Task> edit,
+        Func<long, string, IReadOnlyList<(string Text, string CallbackData)>, CancellationToken, Task> coursePicker,
         CancellationToken cancellationToken)
     {
         var answered = false;
@@ -541,6 +572,11 @@ public sealed class MessageHandler(
             if (callback.Data.StartsWith("examcourse:", StringComparison.Ordinal))
             {
                 await HandleExamCourseCallbackAsync(callback, reply, answer, edit, cancellationToken, () => answered = true);
+                return;
+            }
+            if (callback.Data.StartsWith("submit", StringComparison.Ordinal))
+            {
+                await HandleAssignmentSubmissionCallbackAsync(callback, reply, answer, edit, coursePicker, cancellationToken, () => answered = true);
                 return;
             }
             if (!await authorization.IsAdminAsync(callback.From.Id, cancellationToken))
@@ -657,7 +693,7 @@ public sealed class MessageHandler(
         return false;
     }
 
-    private static string AccessStatusText(TelegramRegistrationStatus? status) => status switch
+    private string AccessStatusText(TelegramRegistrationStatus? status) => status switch
     {
         TelegramRegistrationStatus.Pending => "طلبك قيد مراجعة المسؤول.",
         TelegramRegistrationStatus.Approved => "حسابك معتمد، ويمكنك استخدام خدمات وشوشني.",
@@ -672,6 +708,220 @@ public sealed class MessageHandler(
         MoodleAssignmentsResultKind.Unavailable => MoodleAvailabilityMessages.TemporarilyUnavailable,
         _ => "تم فتح Moodle، لكن تعذر استخراج قائمة المساقات. لم أعتبر ذلك دليلاً على عدم وجود مساقات."
     };
+
+    private async Task ReceiveAssignmentSubmissionContentAsync(Message message, AssignmentSubmissionFlow flow,
+        Func<string, long, CancellationToken, Task<byte[]>> downloadFile,
+        Func<long, string, CancellationToken, Task> reply,
+        Func<long, string, IReadOnlyList<(string Text, string CallbackData)>, CancellationToken, Task> picker,
+        CancellationToken cancellationToken)
+    {
+        if (flow.ExpiresAt < DateTimeOffset.UtcNow)
+        {
+            ClearAssignmentSubmissionFlow(message.From!.Id);
+            await SafeReply(message.Chat!.Id, "انتهت مهلة تجهيز التسليم. أرسل /submit_assignment للبدء من جديد.", reply, cancellationToken);
+            return;
+        }
+        if (flow.Method == MoodleAssignmentSubmissionMethod.OnlineText)
+        {
+            var text = message.Text?.Trim();
+            if (string.IsNullOrWhiteSpace(text) || text.StartsWith('/'))
+            {
+                await SafeReply(message.Chat!.Id, "أرسل النص المطلوب أو رابط الفيديو برسالة عادية، أو /cancel للإلغاء.", reply, cancellationToken);
+                return;
+            }
+            if (text.Length > 20_000)
+            {
+                await SafeReply(message.Chat!.Id, "النص طويل جداً. أرسله على أجزاء أقصر (حد أقصى 20 ألف حرف).", reply, cancellationToken);
+                return;
+            }
+            flow = flow with { PendingText = text, PendingFileName = null, PendingMimeType = null, PendingFileBytes = null,
+                Step = AssignmentSubmissionStep.Confirm, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10) };
+            _assignmentSubmissionFlows[message.From!.Id] = flow;
+            var preview = text.Length > 1200 ? text[..1200] + "… (معاينة مختصرة)" : text;
+            await picker(message.Chat!.Id, $"معاينة التسليم\nالمساق: {flow.CourseName}\nالواجب: {flow.Assignment!.Title}\nالطريقة: نص إلكتروني\n\n{preview}\n\nهل تؤكد حفظه وتسليمه في Moodle؟",
+                [ ("تأكيد التسليم", $"submitconfirm:{flow.RequestId:N}"), ("إلغاء", $"submitcancel:{flow.RequestId:N}") ], cancellationToken);
+            return;
+        }
+
+        var document = message.Document;
+        if (document is null)
+        {
+            await SafeReply(message.Chat!.Id, "هذا الواجب يتطلب ملفاً. أرسله كمرفق Document للحفاظ على الملف الأصلي، أو /cancel للإلغاء.", reply, cancellationToken);
+            return;
+        }
+        var fileName = string.IsNullOrWhiteSpace(document.FileName) ? "submission" : Path.GetFileName(document.FileName);
+        var extension = Path.GetExtension(fileName).ToLowerInvariant();
+        var accepted = flow.Info?.AcceptedExtensions ?? [];
+        if (accepted.Count > 0 && (string.IsNullOrWhiteSpace(extension) || !accepted.Contains(extension, StringComparer.OrdinalIgnoreCase)))
+        {
+            await SafeReply(message.Chat!.Id, $"امتداد الملف غير مقبول. الامتدادات التي يعرضها Moodle: {string.Join(", ", accepted)}.", reply, cancellationToken);
+            return;
+        }
+        var maxBytes = Math.Min(flow.Info?.MaxFileBytes ?? MaxAssignmentFileBytes, MaxAssignmentFileBytes);
+        if (document.FileSize is > 0 && document.FileSize > maxBytes)
+        {
+            await SafeReply(message.Chat!.Id, $"حجم الملف يتجاوز الحد الذي يسمح به الواجب ({FormatBytes(maxBytes)}).", reply, cancellationToken);
+            return;
+        }
+        byte[] bytes;
+        try { bytes = await downloadFile(document.FileId, maxBytes, cancellationToken); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning("Could not download a Moodle assignment submission attachment ({ExceptionType}).", exception.GetType().Name);
+            await SafeReply(message.Chat!.Id, "تعذر استلام الملف من Telegram. جرّب إرساله مرة أخرى.", reply, cancellationToken);
+            return;
+        }
+        if (bytes.Length == 0 || bytes.LongLength > maxBytes)
+        {
+            if (bytes.Length > 0) CryptographicOperations.ZeroMemory(bytes);
+            await SafeReply(message.Chat!.Id, "الملف فارغ أو يتجاوز الحجم المسموح.", reply, cancellationToken);
+            return;
+        }
+        flow = flow with { PendingText = null, PendingFileName = fileName, PendingMimeType = document.MimeType,
+            PendingFileBytes = bytes, Step = AssignmentSubmissionStep.Confirm, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10) };
+        _assignmentSubmissionFlows[message.From!.Id] = flow;
+        await picker(message.Chat!.Id, $"معاينة التسليم\nالمساق: {flow.CourseName}\nالواجب: {flow.Assignment!.Title}\nالطريقة: ملف\nاسم الملف: {fileName}\nالحجم: {FormatBytes(bytes.LongLength)}\n\nهل تؤكد رفعه وتسليمه في Moodle؟",
+            [ ("تأكيد التسليم", $"submitconfirm:{flow.RequestId:N}"), ("إلغاء", $"submitcancel:{flow.RequestId:N}") ], cancellationToken);
+    }
+
+    private async Task HandleAssignmentSubmissionCallbackAsync(CallbackQuery callback,
+        Func<long, string, CancellationToken, Task> reply,
+        Func<string, string, CancellationToken, Task> answer,
+        Func<long, int, string, CancellationToken, Task> edit,
+        Func<long, string, IReadOnlyList<(string Text, string CallbackData)>, CancellationToken, Task> picker,
+        CancellationToken cancellationToken, Action markAnswered)
+    {
+        if (callback.Message!.Chat.Type != ChatType.Private || callback.Message.Chat.Id != callback.From!.Id)
+        { await answer(callback.Id, "استخدم هذه الخطوات في المحادثة الخاصة مع البوت.", cancellationToken); markAnswered(); return; }
+        if (!await authorization.IsApprovedAsync(callback.From.Id, cancellationToken))
+        { await answer(callback.Id, "حسابك غير معتمد لاستخدام خدمات Moodle.", cancellationToken); markAnswered(); return; }
+        var parts = callback.Data!.Split(':', 3);
+        if (parts.Length != 3 || !Guid.TryParseExact(parts[1], "N", out var requestId)
+            || !_assignmentSubmissionFlows.TryGetValue(callback.From.Id, out var flow)
+            || flow.RequestId != requestId || flow.ExpiresAt < DateTimeOffset.UtcNow)
+        { ClearAssignmentSubmissionFlow(callback.From.Id); await answer(callback.Id, "انتهت صلاحية خطوات التسليم. أرسل /submit_assignment للبدء من جديد.", cancellationToken); markAnswered(); return; }
+
+        if (parts[0] == "submitcancel")
+        {
+            ClearAssignmentSubmissionFlow(callback.From.Id);
+            await answer(callback.Id, "تم إلغاء التسليم.", cancellationToken); markAnswered();
+            try { await edit(callback.Message.Chat.Id, callback.Message.MessageId, "تم إلغاء التسليم.", cancellationToken); } catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogDebug("Could not update cancelled submission prompt ({ExceptionType}).", ex.GetType().Name); }
+            return;
+        }
+        if (parts[0] == "submitcourse" && flow.Step == AssignmentSubmissionStep.ChooseCourse && int.TryParse(parts[2], out var courseId)
+            && flow.Courses.TryGetValue(courseId, out var courseName))
+        {
+            await answer(callback.Id, "جارٍ تحميل واجبات المساق...", cancellationToken); markAnswered();
+            try { await edit(callback.Message.Chat.Id, callback.Message.MessageId, $"تم اختيار المساق: {courseName}", cancellationToken); } catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogDebug("Could not update assignment submission course prompt ({ExceptionType}).", ex.GetType().Name); }
+            await SafeReply(callback.Message.Chat.Id, "⏳ جاري تحميل واجبات المساق...", reply, cancellationToken);
+            var result = await moodleBrowser.GetAssignmentsForCourseAsync(callback.From.Id, courseId, cancellationToken);
+            if (!await authorization.IsApprovedAsync(callback.From.Id, cancellationToken))
+            { ClearAssignmentSubmissionFlow(callback.From.Id); await SafeReply(callback.Message.Chat.Id, "تغير اعتماد حسابك أثناء الطلب؛ لم أعرض بيانات Moodle.", reply, cancellationToken); return; }
+            if (result.Assignments.Count == 0)
+            { _assignmentSubmissionFlows.TryRemove(callback.From.Id, out _); await SafeReply(callback.Message.Chat.Id, MoodleAssignmentMessageFormatter.Format(result, DateTimeOffset.UtcNow, moodleOptions.Value.TimeZoneId), reply, cancellationToken); return; }
+            var assignments = result.Assignments.Take(100).ToArray();
+            flow = flow with { Step = AssignmentSubmissionStep.ChooseAssignment, CourseId = courseId, CourseName = courseName, Assignments = assignments, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(15) };
+            _assignmentSubmissionFlows[callback.From.Id] = flow;
+            var choices = assignments.Select((assignment, index) => (TruncateButtonLabel(assignment.Title), $"submitassign:{requestId:N}:{index}" )).ToArray();
+            await picker(callback.Message.Chat.Id, result.Kind == MoodleAssignmentsResultKind.Partial
+                ? "اختر الواجب. ملاحظة: قائمة الواجبات جزئية، لذلك قد لا تظهر كلها."
+                : "اختر الواجب الذي تريد تسليمه:", choices, cancellationToken);
+            return;
+        }
+        if (parts[0] == "submitassign" && flow.Step == AssignmentSubmissionStep.ChooseAssignment && int.TryParse(parts[2], out var index)
+            && index >= 0 && index < flow.Assignments.Count)
+        {
+            await answer(callback.Id, "جارٍ فحص إعدادات التسليم...", cancellationToken); markAnswered();
+            var assignment = flow.Assignments[index];
+            var info = await moodleBrowser.GetAssignmentSubmissionInfoAsync(callback.From.Id, assignment, cancellationToken);
+            if (!await authorization.IsApprovedAsync(callback.From.Id, cancellationToken))
+            { ClearAssignmentSubmissionFlow(callback.From.Id); await reply(callback.Message.Chat.Id, "تغير اعتماد حسابك أثناء الطلب؛ لم أعرض بيانات Moodle.", cancellationToken); return; }
+            if (info.Kind != MoodleAssignmentSubmissionKind.Ready)
+            { _assignmentSubmissionFlows.TryRemove(callback.From.Id, out _); await reply(callback.Message.Chat.Id, info.Message ?? "تعذر قراءة نموذج التسليم في Moodle.", cancellationToken); return; }
+            flow = flow with { Step = AssignmentSubmissionStep.ChooseMethod, Assignment = assignment, Info = info, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(15) };
+            _assignmentSubmissionFlows[callback.From.Id] = flow;
+            if (info.AllowsOnlineText && info.AllowsFiles)
+            {
+                await picker(callback.Message.Chat.Id, "حدد طريقة التسليم التي يسمح بها Moodle. إذا كان المطلوب رابط فيديو، اختر النص الإلكتروني والصق الرابط.",
+                    [ ("نص إلكتروني / رابط", $"submitmode:{requestId:N}:text"), ("رفع ملف", $"submitmode:{requestId:N}:file") ], cancellationToken);
+            }
+            else
+            {
+                var method = info.AllowsOnlineText ? MoodleAssignmentSubmissionMethod.OnlineText : MoodleAssignmentSubmissionMethod.File;
+                flow = flow with { Step = AssignmentSubmissionStep.AwaitingContent, Method = method };
+                _assignmentSubmissionFlows[callback.From.Id] = flow;
+                await PromptForSubmissionContentAsync(callback.Message.Chat.Id, flow, reply, cancellationToken);
+            }
+            return;
+        }
+        if (parts[0] == "submitmode" && flow.Step == AssignmentSubmissionStep.ChooseMethod)
+        {
+            var method = parts[2] switch { "text" => MoodleAssignmentSubmissionMethod.OnlineText, "file" => MoodleAssignmentSubmissionMethod.File, _ => (MoodleAssignmentSubmissionMethod?)null };
+            if (method is null || (method == MoodleAssignmentSubmissionMethod.OnlineText && flow.Info?.AllowsOnlineText != true)
+                || (method == MoodleAssignmentSubmissionMethod.File && flow.Info?.AllowsFiles != true))
+            { await answer(callback.Id, "طريقة التسليم غير متاحة لهذا الواجب.", cancellationToken); markAnswered(); return; }
+            flow = flow with { Step = AssignmentSubmissionStep.AwaitingContent, Method = method, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(15) };
+            _assignmentSubmissionFlows[callback.From.Id] = flow;
+            await answer(callback.Id, "تم اختيار طريقة التسليم.", cancellationToken); markAnswered();
+            await PromptForSubmissionContentAsync(callback.Message.Chat.Id, flow, reply, cancellationToken);
+            return;
+        }
+        if (parts[0] == "submitconfirm" && flow.Step == AssignmentSubmissionStep.Confirm && flow.Assignment is not null && flow.Method is not null)
+        {
+            if (!_assignmentSubmissionFlows.TryRemove(callback.From.Id, out var confirmedFlow))
+            { await answer(callback.Id, "تم استخدام هذا التأكيد مسبقاً.", cancellationToken); markAnswered(); return; }
+            await answer(callback.Id, "جارٍ إرسال الواجب إلى Moodle...", cancellationToken); markAnswered();
+            try { await edit(callback.Message.Chat.Id, callback.Message.MessageId, "جارٍ إرسال الواجب إلى Moodle...", cancellationToken); } catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogDebug("Could not update submission confirmation ({ExceptionType}).", ex.GetType().Name); }
+            try
+            {
+                if (!await authorization.IsApprovedAsync(callback.From.Id, cancellationToken))
+                { await reply(callback.Message.Chat.Id, "تغير اعتماد حسابك؛ لم يتم إرسال الواجب.", cancellationToken); return; }
+                var result = await moodleBrowser.SubmitAssignmentAsync(callback.From.Id, confirmedFlow.Assignment!, confirmedFlow.Method!.Value,
+                    confirmedFlow.PendingText, confirmedFlow.PendingFileName, confirmedFlow.PendingMimeType, confirmedFlow.PendingFileBytes, cancellationToken);
+                await reply(callback.Message.Chat.Id, result.Message, cancellationToken);
+            }
+            finally { if (confirmedFlow.PendingFileBytes is { Length: > 0 } data) CryptographicOperations.ZeroMemory(data); }
+            return;
+        }
+        await answer(callback.Id, "هذه الخطوة غير صالحة أو تم استخدامها. أرسل /submit_assignment للبدء من جديد.", cancellationToken); markAnswered();
+    }
+
+    private async Task PromptForSubmissionContentAsync(long chatId, AssignmentSubmissionFlow flow,
+        Func<long, string, CancellationToken, Task> reply, CancellationToken cancellationToken)
+    {
+        if (flow.Method == MoodleAssignmentSubmissionMethod.OnlineText)
+        {
+            var asksVideoLink = flow.Assignment?.Description is { } description
+                && (description.Contains("فيديو", StringComparison.OrdinalIgnoreCase) || description.Contains("video", StringComparison.OrdinalIgnoreCase))
+                && (description.Contains("رابط", StringComparison.OrdinalIgnoreCase) || description.Contains("لينك", StringComparison.OrdinalIgnoreCase)
+                    || description.Contains("link", StringComparison.OrdinalIgnoreCase) || description.Contains("youtube", StringComparison.OrdinalIgnoreCase)
+                    || description.Contains("google drive", StringComparison.OrdinalIgnoreCase));
+            var instruction = asksVideoLink
+                ? "قرأت في تعليمات الواجب أنها تطلب رابط فيديو؛ أرسل الرابط في رسالة عادية وسأضعه في محرر النص."
+                : "أرسل النص الذي تريد وضعه في محرر Moodle (ويمكن أن يكون رابطاً إذا طلبه المدرّس).";
+            await reply(chatId, $"{instruction} لن أرسله قبل أن أعرض لك معاينة وتضغط تأكيد التسليم.", cancellationToken);
+        }
+        else
+        {
+            var info = flow.Info!;
+            var accepted = info.AcceptedExtensions.Count == 0 ? "لم يحدد Moodle امتدادات ظاهرة" : string.Join(", ", info.AcceptedExtensions);
+            var asksPdf = flow.Assignment?.Description?.Contains("pdf", StringComparison.OrdinalIgnoreCase) == true;
+            var maxSize = info.MaxFileBytes.HasValue
+                ? $"حد Moodle الظاهر: {FormatBytes(Math.Min(info.MaxFileBytes.Value, MaxAssignmentFileBytes))}"
+                : $"لم يظهر حد Moodle؛ حد الاستلام في البوت {FormatBytes(MaxAssignmentFileBytes)}";
+            var instruction = asksPdf ? "تعليمات الواجب تذكر PDF؛ تأكد أن ملفك PDF." : "";
+            await reply(chatId, $"{instruction} أرفق الملف كـ Document. الامتدادات المقبولة: {accepted}. {maxSize}. سأعرض معاينة وأطلب تأكيدك قبل التسليم.", cancellationToken);
+        }
+    }
+
+    private static string FormatBytes(long bytes) => bytes >= 1024 * 1024
+        ? $"{bytes / (1024d * 1024d):0.#} ميغابايت" : $"{bytes / 1024d:0.#} كيلوبايت";
+
+    private void ClearAssignmentSubmissionFlow(long userId)
+    {
+        if (_assignmentSubmissionFlows.TryRemove(userId, out var old) && old.PendingFileBytes is { Length: > 0 } bytes)
+            CryptographicOperations.ZeroMemory(bytes);
+    }
 
     private async Task HandleAssignmentCourseCallbackAsync(
         CallbackQuery callback,
@@ -832,5 +1082,11 @@ public sealed class MessageHandler(
     private sealed record LinkFlow(LinkStep Step, string? StudentId, DateTimeOffset StartedAt);
     private sealed record ImageAttachment(string FileId, string MimeType, long? FileSize);
     private sealed record AudioAttachment(string FileId, string MimeType, long? FileSize);
+    private enum AssignmentSubmissionStep { ChooseCourse, ChooseAssignment, ChooseMethod, AwaitingContent, Confirm }
+    private sealed record AssignmentSubmissionFlow(Guid RequestId, AssignmentSubmissionStep Step,
+        IReadOnlyDictionary<int, string> Courses, IReadOnlyList<MoodleAssignment> Assignments,
+        int? CourseId, string? CourseName, MoodleAssignment? Assignment, MoodleAssignmentSubmissionInfo? Info,
+        MoodleAssignmentSubmissionMethod? Method, string? PendingText, string? PendingFileName, string? PendingMimeType,
+        byte[]? PendingFileBytes, DateTimeOffset ExpiresAt);
     private sealed record AssignmentCoursePicker(Guid RequestId, IReadOnlyDictionary<int, string> Courses, DateTimeOffset ExpiresAt);
 }

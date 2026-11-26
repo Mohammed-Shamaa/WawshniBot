@@ -48,6 +48,7 @@ The GitHub repository root is the project root. Create a Docker Web Service from
 - `GoogleAI__GeminiModel` = `gemini-3.8-flash` (enter the variable name and value with no spaces around them)
 - `GoogleAI__FallbackModel` = `gemini-3.5-flash-lite` (first fallback model)
 - `GoogleAI__FallbackModel2` = `gemini-3.1-flash-lite` (optional second fallback, attempted if the primary and first fallback are unavailable or time out)
+- `BotContact__DeveloperEmail` = developer contact address shown in support messages and shared by the assistant when asked who maintains the bot (store only in Render; do not commit a personal address)
 - `KeepAlive__Url=https://wawshnibot.onrender.com/health`
 - `KeepAlive__IntervalMinutes=10` (optional; clamped to 5–14 minutes)
 - `Dashboard__Username` = a private dashboard login name

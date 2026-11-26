@@ -133,7 +133,7 @@ public sealed class MoodleBrowserService(
         {
             var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
             if (stored is null) return new(false, false);
-            return await WithStoredSessionAsync(stored, async page =>
+            return await WithStoredSessionAsync<MoodleStatusResult>(stored, async page =>
             {
                 IResponse? response;
                 try
@@ -172,7 +172,7 @@ public sealed class MoodleBrowserService(
             var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
             if (stored is null) return new(MoodleLinkResultKind.Expired, [], false);
             logger.LogInformation("Encrypted Moodle session record was found.");
-            return await WithStoredSessionAsync(stored, async page =>
+            return await WithStoredSessionAsync<MoodleLinkResult>(stored, async page =>
             {
                 return await ReadCoursesOnPageAsync(page, cancellationToken);
             }, cancellationToken);
@@ -335,6 +335,162 @@ public sealed class MoodleBrowserService(
 
     public Task<MoodleAssignmentsResult> GetAssignmentsForCourseAsync(long telegramUserId, int courseId, CancellationToken cancellationToken) =>
         GetAssignmentsCoreAsync(telegramUserId, courseId, cancellationToken);
+
+    public async Task<MoodleAssignmentSubmissionInfo> GetAssignmentSubmissionInfoAsync(long telegramUserId, MoodleAssignment assignment, CancellationToken cancellationToken)
+    {
+        var gate = _userLocks.GetOrAdd(telegramUserId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
+            if (stored is null) return new(MoodleAssignmentSubmissionKind.Expired, assignment.Title, false, false, [], null, 0);
+            return await WithStoredSessionAsync<MoodleAssignmentSubmissionInfo>(stored, async page =>
+            {
+                if (!IsSafeAssignmentUrl(assignment.Url)) return new(MoodleAssignmentSubmissionKind.Unsupported, assignment.Title, false, false, [], null, 0, "رابط الواجب غير صالح.");
+                var response = await page.GotoAsync(assignment.Url, new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 25_000 });
+                if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase))
+                    return new(MoodleAssignmentSubmissionKind.Expired, assignment.Title, false, false, [], null, 0);
+                if (response?.Status is >= 400) return new(MoodleAssignmentSubmissionKind.Unavailable, assignment.Title, false, false, [], null, 0);
+                await OpenAssignmentSubmissionFormAsync(page);
+                var json = await page.EvaluateAsync<string>("""
+                () => {
+                  const form = document.querySelector('#mform1') || document.querySelector('form[action*="editsubmission"]') || document.querySelector('form');
+                  if (!form) return JSON.stringify({text:false, files:false, extensions:[], maxBytes:0, maxFiles:0});
+                  const textInputs = [...form.querySelectorAll('textarea, [contenteditable="true"], iframe')];
+                  const text = textInputs.some(e => /onlinetext|editor|text/i.test((e.name || '') + ' ' + (e.id || '') + ' ' + (e.className || '')));
+                  const fileInput = form.querySelector('input[type="file"]');
+                  const fileRegion = form.querySelector('[data-fieldtype="filemanager"], [data-fieldtype="filepicker"], [data-region*="filemanager"]');
+                  const files = !!fileInput || !!fileRegion;
+                  const accept = fileInput?.getAttribute('accept') || form.querySelector('[data-filetypes]')?.getAttribute('data-filetypes') || '';
+                  const extensions = [...new Set(accept.match(/\.[a-z0-9]+/gi) || [])].map(x => x.toLowerCase());
+                  const labels = form.innerText || '';
+                  const maxText = labels.match(/(?:maximum file size|max file size|أقصى حجم للملف)[^\d]{0,30}(\d+(?:[.,]\d+)?)\s*(bytes?|b|kib?|mib?|gib?|ميغا\s?بايت|ميجابايت|كيلوبايت|بايت)/i);
+                  let labelledBytes = 0;
+                  if (maxText) {
+                    const amount = Number(maxText[1].replace(',', '.'));
+                    const unit = maxText[2].toLowerCase();
+                    const multiplier = /^(g|gi|gib)|جيجا/.test(unit) ? 1024 ** 3 : /^(m|mi|mib)|ميغا|ميجا/.test(unit) ? 1024 ** 2 : /^(k|ki|kib)|كيلو/.test(unit) ? 1024 : 1;
+                    labelledBytes = Math.floor(amount * multiplier);
+                  }
+                  const maxBytes = Number(fileInput?.getAttribute('data-maxbytes') || form.querySelector('[data-maxbytes]')?.getAttribute('data-maxbytes') || labelledBytes);
+                  const maxFiles = Number(fileInput?.getAttribute('data-maxfiles') || form.querySelector('[data-maxfiles]')?.getAttribute('data-maxfiles') || 0);
+                  return JSON.stringify({text, files, extensions, maxBytes, maxFiles});
+                }
+                """);
+                var form = System.Text.Json.JsonSerializer.Deserialize<SubmissionFormSnapshot>(json, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+                if (form is null || (!form.Text && !form.Files))
+                    return new(MoodleAssignmentSubmissionKind.Unsupported, assignment.Title, false, false, [], null, 0, "لم أتعرف على طريقة التسليم المفعّلة في نموذج Moodle؛ لم أرسل أي شيء.");
+                return new(MoodleAssignmentSubmissionKind.Ready, assignment.Title, form.Text, form.Files,
+                    form.Extensions ?? [], form.MaxBytes > 0 ? form.MaxBytes : null, form.MaxFiles > 0 ? form.MaxFiles : 1);
+            }, cancellationToken);
+        }
+        catch (System.Security.Cryptography.CryptographicException)
+        { return new(MoodleAssignmentSubmissionKind.Unavailable, assignment.Title, false, false, [], null, 0, "تعذر فك تشفير جلسة Moodle."); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning("Could not inspect Moodle assignment submission form ({ExceptionType}).", exception.GetType().Name);
+            return new(MoodleAssignmentSubmissionKind.Unavailable, assignment.Title, false, false, [], null, 0);
+        }
+        finally { gate.Release(); }
+    }
+
+    public async Task<MoodleAssignmentSubmissionResult> SubmitAssignmentAsync(long telegramUserId, MoodleAssignment assignment,
+        MoodleAssignmentSubmissionMethod method, string? text, string? fileName, string? mimeType, byte[]? fileBytes, CancellationToken cancellationToken)
+    {
+        var gate = _userLocks.GetOrAdd(telegramUserId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
+            if (stored is null) return new(false, "انتهت جلسة Moodle أو لم تعد موجودة. أرسل /link لإعادة الربط.");
+            return await WithStoredSessionAsync<MoodleAssignmentSubmissionResult>(stored, async page =>
+            {
+                if (!IsSafeAssignmentUrl(assignment.Url)) return new(false, "رابط الواجب غير صالح.");
+                var response = await page.GotoAsync(assignment.Url, new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 25_000 });
+                if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)) return new(false, "انتهت جلسة Moodle؛ أرسل /link لإعادة الربط.");
+                if (response?.Status is >= 400) return new(false, "تعذر فتح صفحة الواجب في Moodle.");
+                await OpenAssignmentSubmissionFormAsync(page);
+                if (method == MoodleAssignmentSubmissionMethod.OnlineText)
+                {
+                    if (string.IsNullOrWhiteSpace(text)) return new(false, "النص فارغ.");
+                    var editor = page.Locator("textarea[name*='onlinetext']:visible, textarea[id*='onlinetext']:visible, textarea[id*='editor']:visible").First;
+                    if (await editor.CountAsync() > 0) await editor.FillAsync(text);
+                    else
+                    {
+                        var editable = page.Locator("[contenteditable='true'][id*='editor']:visible, .editor_atto_content[contenteditable='true']:visible").First;
+                        if (await editable.CountAsync() > 0) await editable.FillAsync(text);
+                        else
+                        {
+                            var tinyBody = page.FrameLocator(".tox-edit-area iframe").Locator("body");
+                            if (await tinyBody.CountAsync() == 0) return new(false, "نموذج النص غير متاح في صفحة Moodle؛ لم يتم الحفظ.");
+                            await tinyBody.FillAsync(text);
+                        }
+                    }
+                }
+                else
+                {
+                    if (fileBytes is null || fileBytes.Length == 0 || string.IsNullOrWhiteSpace(fileName)) return new(false, "الملف غير صالح.");
+                    var input = page.Locator("form input[type='file']").First;
+                    if (await input.CountAsync() == 0) return new(false, "حقل رفع الملفات غير موجود في نموذج Moodle.");
+                    await input.SetInputFilesAsync(new FilePayload { Name = Path.GetFileName(fileName), MimeType = mimeType ?? "application/octet-stream", Buffer = fileBytes });
+                }
+
+                var save = page.Locator("form button[name='submitbutton'], form input[name='submitbutton'], form button:has-text('Save changes'), form button:has-text('حفظ التغييرات')").First;
+                if (await save.CountAsync() == 0) return new(false, "زر حفظ نموذج التسليم غير موجود؛ لم يتم إرسال الواجب.");
+                await save.ClickAsync();
+                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = 10_000 }).ContinueOnTimeout();
+                var finalSubmit = page.GetByRole(AriaRole.Button, new() { NameRegex = new System.Text.RegularExpressions.Regex("submit assignment|تقديم الواجب|إرسال الواجب", System.Text.RegularExpressions.RegexOptions.IgnoreCase) }).First;
+                if (await finalSubmit.CountAsync() > 0)
+                {
+                    await finalSubmit.ClickAsync();
+                    var confirm = page.GetByRole(AriaRole.Button, new() { NameRegex = new System.Text.RegularExpressions.Regex("submit assignment|confirm|تقديم الواجب|تأكيد", System.Text.RegularExpressions.RegexOptions.IgnoreCase) }).Last;
+                    if (await confirm.CountAsync() > 0) await confirm.ClickAsync();
+                    await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = 10_000 }).ContinueOnTimeout();
+                }
+                var verified = await ReadAssignmentDetailAsync(page,
+                    new AssignmentLink { Href = assignment.Url, Title = assignment.Title }, assignment.Course, cancellationToken);
+                var confirmed = verified?.Status is MoodleAssignmentStatus.Submitted or MoodleAssignmentStatus.SubmittedLate
+                    or MoodleAssignmentStatus.Graded or MoodleAssignmentStatus.NeedsRevision;
+                return confirmed ? new(true, "أكد Moodle استلام الواجب.") : new(false, "حفظت Moodle التغييرات، لكن لم أتمكن من التحقق من اكتمال التسليم النهائي. افتح صفحة الواجب للتأكد من حالته.");
+            }, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning("Moodle assignment submission failed ({ExceptionType}).", exception.GetType().Name);
+            return new(false, "تعذر إكمال التسليم في Moodle. افتح الواجب وتأكد من حالته قبل إعادة المحاولة حتى لا يتكرر الإرسال.");
+        }
+        finally { gate.Release(); }
+    }
+
+    private static bool IsSafeAssignmentUrl(string value) => Uri.TryCreate(value, UriKind.Absolute, out var uri)
+        && uri.Scheme == Uri.UriSchemeHttps && uri.AbsolutePath.Equals("/mod/assign/view.php", StringComparison.OrdinalIgnoreCase)
+        && IsUniversityHost(uri.ToString()) && !string.IsNullOrWhiteSpace(System.Web.HttpUtility.ParseQueryString(uri.Query).Get("id"));
+
+    private static async Task OpenAssignmentSubmissionFormAsync(IPage page)
+    {
+        var editorUrl = new UriBuilder(page.Url);
+        var query = System.Web.HttpUtility.ParseQueryString(editorUrl.Query);
+        if (!string.Equals(query.Get("action"), "editsubmission", StringComparison.OrdinalIgnoreCase))
+        {
+            var actionLink = page.Locator("a[href*='action=editsubmission'], button[data-action*='editsubmission'], button:has-text('Add submission'), button:has-text('إضافة تسليم')").First;
+            if (await actionLink.CountAsync() == 0)
+            {
+                actionLink = page.GetByRole(AriaRole.Link, new() { NameRegex = new System.Text.RegularExpressions.Regex("add submission|edit submission|إضافة تسليم|تحرير التسليم", System.Text.RegularExpressions.RegexOptions.IgnoreCase) }).First;
+            }
+            if (await actionLink.CountAsync() == 0) return;
+            await actionLink.ClickAsync();
+            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new() { Timeout = 15_000 }).ContinueOnTimeout();
+        }
+    }
+
+    private sealed class SubmissionFormSnapshot
+    {
+        public bool Text { get; set; }
+        public bool Files { get; set; }
+        public string[]? Extensions { get; set; }
+        public long MaxBytes { get; set; }
+        public int MaxFiles { get; set; }
+    }
 
     private async Task<MoodleAssignmentsResult> GetAssignmentsCoreAsync(long telegramUserId, int? selectedCourseId, CancellationToken cancellationToken)
     {

@@ -13,7 +13,6 @@ namespace Wawshni.Bot.Services;
 
 public static class AdminDashboardEndpoints
 {
-    private const string RejectedAccessNotice = "هههههههههههههههههههههههههههههههه يا هلفوت فش استخدام للبوت بكفي , روح افتح المودل\nحسابك حالياً غير معتمد لاستخدام وشوشني ارسل /my_access لمعرفة الحالة، وإذا عندك استفسار أو بتعتقد أنه صار خطأ، تواصل مع المهندس محمد: mohammedmomen177@gmail.com";
 
     public static void MapAdminDashboard(this WebApplication app)
     {
@@ -121,7 +120,7 @@ public static class AdminDashboardEndpoints
             return Results.Ok(new { user = updated, notificationSent });
         });
         api.MapPost("/users/{userId:long}/revoke", async (long userId, DashboardStatusRequest request, ClaimsPrincipal actor,
-            TelegramUserRepository users, TelegramBotService bot, ILoggerFactory loggerFactory, HttpContext context, IAntiforgery antiforgery,
+            TelegramUserRepository users, TelegramBotService bot, IOptions<BotContactOptions> botContact, ILoggerFactory loggerFactory, HttpContext context, IAntiforgery antiforgery,
             CancellationToken cancellationToken) =>
         {
             if (!await HasValidCsrfAsync(context, antiforgery)) return Results.BadRequest(new { error = "csrf" });
@@ -129,7 +128,7 @@ public static class AdminDashboardEndpoints
                 [TelegramRegistrationStatus.Approved], cancellationToken, SafeReason(request.Reason), actor.Identity?.Name);
             if (updated is null) return Results.Conflict(new { error = "user_missing_or_not_approved" });
             var notificationSent = await NotifySafelyAsync(bot, userId,
-                RejectedAccessNotice,
+                botContact.Value.RejectedAccessNotice,
                 loggerFactory, cancellationToken);
             return Results.Ok(new { user = updated, notificationSent });
         });

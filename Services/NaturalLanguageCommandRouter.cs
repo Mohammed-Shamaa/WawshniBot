@@ -12,6 +12,8 @@ public static partial class NaturalLanguageCommandRouter
         if (IsAskingAboutCommands(text)) return null;
         if (IsAskingForLearningHelp(text)) return null;
 
+        if (IsAssignmentSubmissionRequest(text)) return "/submit_assignment";
+
         if (ContainsAny(text, "كل الامتحانات", "جميع الامتحانات", "كل امتحانات", "جميع امتحانات", "كل الاختبارات", "جميع الاختبارات", "كل كويزات", "كل الكويزات", "كل امتحاناتي", "كل اختباراتي", "all exams", "all the exams", "all my exams", "all quizzes", "all my quizzes", "all tests"))
             return "/all_exams";
 
@@ -29,6 +31,10 @@ public static partial class NaturalLanguageCommandRouter
         IsStandaloneRequest(text, "واجباتي", "شو واجباتي", "اسايمنتاتي", "my assignments", "my homework")
         || (ContainsAny(text, "واجب", "الواجب", "واجبات", "الواجبات", "اسايمنت", "assignments", "assignment", "homework", "coursework")
             && IsRetrievalRequest(text));
+
+    private static bool IsAssignmentSubmissionRequest(string text) =>
+        ContainsAny(text, "اسلم واجب", "اسلم الواجب", "اسلم واجبات", "سلم الواجب", "تسليم الواجب", "تسليم واجب", "ارفع الواجب", "ارفع واجب", "رفع الواجب", "رفع واجب",
+            "submit assignment", "submit my assignment", "turn in assignment", "turn in my assignment", "upload assignment", "upload my assignment", "submit homework", "turn in homework");
 
     private static bool IsExamRequest(string text) =>
         IsStandaloneRequest(text, "امتحاناتي", "شو امتحاناتي", "اختباراتي", "كويزاتي", "my exams", "my quizzes", "my tests")

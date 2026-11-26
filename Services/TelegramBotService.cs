@@ -93,6 +93,9 @@ public sealed class TelegramBotService : IUpdateHandler
                 async (callbackId, text, ct) => await botClient.AnswerCallbackQuery(callbackId, text, cancellationToken: ct),
                 async (chatId, messageId, text, ct) => await botClient.EditMessageText(chatId, messageId, text,
                     replyMarkup: new InlineKeyboardMarkup(Array.Empty<InlineKeyboardButton[]>()), cancellationToken: ct),
+                async (chatId, text, choices, ct) => await botClient.SendMessage(chatId, text,
+                    replyMarkup: new InlineKeyboardMarkup(choices.Select(choice =>
+                        new[] { InlineKeyboardButton.WithCallbackData(choice.Text, choice.CallbackData) })), cancellationToken: ct),
                 cancellationToken);
             Interlocked.Exchange(ref _lastSuccessfulUpdateTicks, DateTimeOffset.UtcNow.Ticks);
         }
