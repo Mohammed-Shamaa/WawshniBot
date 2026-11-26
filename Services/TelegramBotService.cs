@@ -9,11 +9,18 @@ using Microsoft.Extensions.Options;
 namespace Wawshni.Bot.Services;
 public sealed class TelegramBotService : IUpdateHandler
 {
+    private static readonly TimeSpan[] PollingConflictBackoff =
+    [
+        TimeSpan.FromSeconds(5),
+        TimeSpan.FromSeconds(15),
+        TimeSpan.FromSeconds(30)
+    ];
     private TelegramBotClient? _client;
     private readonly MessageHandler _handler;
     private readonly ILogger<TelegramBotService> _logger;
     private CancellationTokenSource? _pollingCancellation;
     private int _pollingActive;
+    private int _pollingConflictDetected;
     private long _lastSuccessfulUpdateTicks;
     public bool PollingActive => Volatile.Read(ref _pollingActive) == 1;
     public DateTimeOffset? LastSuccessfulUpdate
@@ -38,23 +45,41 @@ public sealed class TelegramBotService : IUpdateHandler
         _client = new TelegramBotClient(token);
         var me = await _client.GetMe(cancellationToken);
         _logger.LogInformation("Starting long polling for @{BotUsername}.", me.Username);
-        using var pollingCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _pollingCancellation = pollingCancellation;
-        Volatile.Write(ref _pollingActive, 1);
-        try
+        var conflictAttempt = 0;
+        while (!cancellationToken.IsCancellationRequested)
         {
-            await _client.ReceiveAsync(this,
-                new ReceiverOptions { AllowedUpdates = [UpdateType.Message, UpdateType.CallbackQuery] },
-                pollingCancellation.Token);
-        }
-        catch (OperationCanceledException) when (pollingCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-        {
-            _logger.LogCritical("Telegram polling stopped because another process is polling this bot token. Stop the other process or use a token dedicated to this service.");
-        }
-        finally
-        {
-            _pollingCancellation = null;
-            Volatile.Write(ref _pollingActive, 0);
+            using var pollingCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _pollingCancellation = pollingCancellation;
+            Interlocked.Exchange(ref _pollingConflictDetected, 0);
+            Volatile.Write(ref _pollingActive, 1);
+            var conflictDetected = false;
+            try
+            {
+                await _client.ReceiveAsync(this,
+                    new ReceiverOptions { AllowedUpdates = [UpdateType.Message, UpdateType.CallbackQuery] },
+                    pollingCancellation.Token);
+            }
+            catch (OperationCanceledException) when (pollingCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                conflictDetected = Volatile.Read(ref _pollingConflictDetected) == 1;
+            }
+            finally
+            {
+                _pollingCancellation = null;
+                Volatile.Write(ref _pollingActive, 0);
+            }
+
+            if (!conflictDetected) return;
+            if (conflictAttempt >= PollingConflictBackoff.Length)
+            {
+                _logger.LogCritical("Telegram polling stopped after repeated HTTP 409 conflicts. Stop the other process polling this token or use a token dedicated to this service.");
+                return;
+            }
+
+            var delay = PollingConflictBackoff[conflictAttempt++];
+            _logger.LogWarning("Telegram polling received HTTP 409; retrying after {DelaySeconds} seconds (retry {RetryNumber}/{RetryLimit}).",
+                delay.TotalSeconds, conflictAttempt, PollingConflictBackoff.Length);
+            await Task.Delay(delay, cancellationToken);
         }
     }
     public async Task<bool> TrySendMessageAsync(long chatId, string text, CancellationToken cancellationToken)
@@ -127,7 +152,12 @@ public sealed class TelegramBotService : IUpdateHandler
                     ? "another-poller"
                     : "unknown-conflict";
             _logger.LogError("Telegram polling conflict (HTTP 409, {Cause}) while handling {Source}.", cause, source);
-            if (source == HandleErrorSource.PollingError)
+            if (source == HandleErrorSource.PollingError && _pollingCancellation is { } pollingCancellation)
+            {
+                Interlocked.Exchange(ref _pollingConflictDetected, 1);
+                _logger.LogWarning("Stopping this polling attempt after HTTP 409 so it can retry cleanly after backoff.");
+                pollingCancellation.Cancel();
+            }
                 _pollingCancellation?.Cancel();
         }
         else if (exception is ApiRequestException apiException) _logger.LogError("Telegram API error {ErrorCode} while handling {Source}.", apiException.ErrorCode, source);
