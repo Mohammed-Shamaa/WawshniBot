@@ -795,11 +795,33 @@ public sealed class MessageHandler(
         { await answer(callback.Id, "استخدم هذه الخطوات في المحادثة الخاصة مع البوت.", cancellationToken); markAnswered(); return; }
         if (!await authorization.IsApprovedAsync(callback.From.Id, cancellationToken))
         { await answer(callback.Id, "حسابك غير معتمد لاستخدام خدمات Moodle.", cancellationToken); markAnswered(); return; }
-        var parts = callback.Data!.Split(':', 3);
-        if (parts.Length != 3 || !Guid.TryParseExact(parts[1], "N", out var requestId)
-            || !_assignmentSubmissionFlows.TryGetValue(callback.From.Id, out var flow)
-            || flow.RequestId != requestId || flow.ExpiresAt < DateTimeOffset.UtcNow)
-        { ClearAssignmentSubmissionFlow(callback.From.Id); await answer(callback.Id, "انتهت صلاحية خطوات التسليم. أرسل /submit_assignment للبدء من جديد.", cancellationToken); markAnswered(); return; }
+        var parts = callback.Data!.Split(':');
+        var confirmationAction = parts.Length > 0 && parts[0] is "submitconfirm" or "submitcancel";
+        var argumentAction = parts.Length > 0 && parts[0] is "submitcourse" or "submitassign" or "submitmode";
+        if ((!confirmationAction && !argumentAction)
+            || parts.Length != (confirmationAction ? 2 : 3)
+            || !Guid.TryParseExact(parts[1], "N", out var requestId))
+        {
+            const string invalidMessage = "زر التسليم غير صالح أو قديم. أرسل /submit_assignment للبدء من جديد.";
+            await answer(callback.Id, invalidMessage, cancellationToken); markAnswered();
+            await reply(callback.Message.Chat.Id, invalidMessage, cancellationToken);
+            return;
+        }
+        if (!_assignmentSubmissionFlows.TryGetValue(callback.From.Id, out var flow) || flow.RequestId != requestId)
+        {
+            const string expiredMessage = "انتهت صلاحية خطوات التسليم أو لم تعد نشطة. أرسل /submit_assignment للبدء من جديد.";
+            await answer(callback.Id, expiredMessage, cancellationToken); markAnswered();
+            await reply(callback.Message.Chat.Id, expiredMessage, cancellationToken);
+            return;
+        }
+        if (flow.ExpiresAt < DateTimeOffset.UtcNow)
+        {
+            ClearAssignmentSubmissionFlow(callback.From.Id);
+            const string expiredMessage = "انتهت صلاحية خطوات التسليم. أرسل /submit_assignment للبدء من جديد.";
+            await answer(callback.Id, expiredMessage, cancellationToken); markAnswered();
+            await reply(callback.Message.Chat.Id, expiredMessage, cancellationToken);
+            return;
+        }
 
         if (parts[0] == "submitcancel")
         {
