@@ -529,10 +529,16 @@ public sealed class MoodleBrowserService(
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var current = new Uri(page.Url);
         var incomplete = false;
+        string? incompleteReason = null;
         for (var pageNumber = 0; pageNumber < 50; pageNumber++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!visited.Add(current.AbsoluteUri)) { incomplete = true; break; }
+            if (!visited.Add(current.AbsoluteUri))
+            {
+                incomplete = true;
+                incompleteReason = "pagination repeated a previously visited URL";
+                break;
+            }
             var anchors = page.Locator("a[href*='course/view.php']").Visible;
             if (pageNumber == 0)
             {
@@ -548,18 +554,34 @@ public sealed class MoodleBrowserService(
             foundLinks.AddRange(pageLinks);
             var nextLink = page.Locator(".pagination a[rel='next'], nav[aria-label*='pagination' i] a[aria-label*='next' i], nav[aria-label*='التصفح'] a[aria-label*='التالي'], a[aria-label='Next page'], a[aria-label='الصفحة التالية']");
             if (await nextLink.CountAsync() == 0) break;
-            if (pageNumber == 49) { incomplete = true; break; }
+            if (pageNumber == 49)
+            {
+                incomplete = true;
+                incompleteReason = "pagination limit reached";
+                break;
+            }
             var href = await nextLink.First.GetAttributeAsync("href");
-            if (!Uri.TryCreate(current, href, out var nextUri) || !IsUniversityHost(nextUri.ToString())) { incomplete = true; break; }
+            if (!Uri.TryCreate(current, href, out var nextUri) || !IsUniversityHost(nextUri.ToString()))
+            {
+                incomplete = true;
+                incompleteReason = "next-page link was invalid or outside the Moodle host";
+                break;
+            }
             current = nextUri;
             var pageResponse = await page.GotoAsync(current.ToString(), new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 20_000 });
             if (!IsUniversityHost(page.Url) || page.Url.Contains("/login/", StringComparison.OrdinalIgnoreCase)) return new(MoodleAssignmentsResultKind.Expired, []);
-            if (pageResponse?.Status is >= 400) { incomplete = true; break; }
+            if (pageResponse?.Status is >= 400)
+            {
+                incomplete = true;
+                incompleteReason = $"next page returned HTTP {pageResponse.Status}";
+                break;
+            }
         }
 
         var links = MoodleCourseDomExtractor.NormalizeLinks(foundLinks.Select(link => new MoodleCourseLink(link.Name, link.Href)), options.Value.BaseUrl);
         var courses = MoodleCourseDomExtractor.ToAssignmentOptions(links);
-        logger.LogInformation("Moodle assignment picker found {CourseCount} enrolled courses; course list incomplete {Incomplete}.", courses.Count, incomplete);
+        logger.LogInformation("Moodle assignment picker found {CourseCount} enrolled courses; course list incomplete {Incomplete}; reason {IncompleteReason}.",
+            courses.Count, incomplete, incompleteReason ?? "none");
         if (courses.Count == 0)
             return await HasExplicitEmptyCourseMessageAsync(page)
                 ? new(MoodleAssignmentsResultKind.Success, [])

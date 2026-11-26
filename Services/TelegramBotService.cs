@@ -12,6 +12,7 @@ public sealed class TelegramBotService : IUpdateHandler
     private TelegramBotClient? _client;
     private readonly MessageHandler _handler;
     private readonly ILogger<TelegramBotService> _logger;
+    private CancellationTokenSource? _pollingCancellation;
     private int _pollingActive;
     private long _lastSuccessfulUpdateTicks;
     public bool PollingActive => Volatile.Read(ref _pollingActive) == 1;
@@ -37,9 +38,24 @@ public sealed class TelegramBotService : IUpdateHandler
         _client = new TelegramBotClient(token);
         var me = await _client.GetMe(cancellationToken);
         _logger.LogInformation("Starting long polling for @{BotUsername}.", me.Username);
+        using var pollingCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _pollingCancellation = pollingCancellation;
         Volatile.Write(ref _pollingActive, 1);
-        try { await _client.ReceiveAsync(this, new ReceiverOptions { AllowedUpdates = [UpdateType.Message, UpdateType.CallbackQuery] }, cancellationToken); }
-        finally { Volatile.Write(ref _pollingActive, 0); }
+        try
+        {
+            await _client.ReceiveAsync(this,
+                new ReceiverOptions { AllowedUpdates = [UpdateType.Message, UpdateType.CallbackQuery] },
+                pollingCancellation.Token);
+        }
+        catch (OperationCanceledException) when (pollingCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogCritical("Telegram polling stopped because another process is polling this bot token. Stop the other process or use a token dedicated to this service.");
+        }
+        finally
+        {
+            _pollingCancellation = null;
+            Volatile.Write(ref _pollingActive, 0);
+        }
     }
     public async Task<bool> TrySendMessageAsync(long chatId, string text, CancellationToken cancellationToken)
     {
@@ -111,6 +127,8 @@ public sealed class TelegramBotService : IUpdateHandler
                     ? "another-poller"
                     : "unknown-conflict";
             _logger.LogError("Telegram polling conflict (HTTP 409, {Cause}) while handling {Source}.", cause, source);
+            if (source == HandleErrorSource.PollingError)
+                _pollingCancellation?.Cancel();
         }
         else if (exception is ApiRequestException apiException) _logger.LogError("Telegram API error {ErrorCode} while handling {Source}.", apiException.ErrorCode, source);
         else _logger.LogError("Telegram polling error of type {ExceptionType} from {Source}.", exception.GetType().Name, source);
