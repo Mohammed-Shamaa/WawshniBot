@@ -16,6 +16,48 @@ public sealed class MoodleBrowserService(
     ILogger<MoodleBrowserService> logger)
 {
     private readonly ConcurrentDictionary<long, SemaphoreSlim> _userLocks = new();
+    private readonly ConcurrentDictionary<MoodleReadCacheKey, MoodleReadCacheEntry> _readCache = new();
+    private static readonly TimeSpan CourseListCacheLifetime = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan AssignmentCacheLifetime = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan QuizCacheLifetime = TimeSpan.FromSeconds(30);
+
+    private readonly record struct MoodleReadCacheKey(long UserId, long SessionUpdatedTicks, string Operation, int CourseId);
+    private sealed record MoodleReadCacheEntry(object Value, DateTimeOffset ExpiresAt);
+
+    private static MoodleReadCacheKey CacheKey(StoredMoodleSession session, string operation, int courseId = -1) =>
+        new(session.TelegramUserId, session.UpdatedAt.UtcDateTime.Ticks, operation, courseId);
+
+    private bool TryGetReadCache<T>(StoredMoodleSession session, string operation, int courseId, out T? value)
+    {
+        var key = CacheKey(session, operation, courseId);
+        if (_readCache.TryGetValue(key, out var entry))
+        {
+            if (entry.ExpiresAt > DateTimeOffset.UtcNow && entry.Value is T cached)
+            {
+                value = cached;
+                logger.LogDebug("Using short-lived Moodle read cache for operation {Operation} and course {CourseId}.", operation, courseId);
+                return true;
+            }
+            _readCache.TryRemove(key, out _);
+        }
+        value = default;
+        return false;
+    }
+
+    private void StoreReadCache<T>(StoredMoodleSession session, string operation, int courseId, T value, TimeSpan lifetime)
+    {
+        _readCache[CacheKey(session, operation, courseId)] = new MoodleReadCacheEntry(value!, DateTimeOffset.UtcNow.Add(lifetime));
+        if (_readCache.Count <= 512) return;
+        var now = DateTimeOffset.UtcNow;
+        foreach (var (key, entry) in _readCache)
+            if (entry.ExpiresAt <= now) _readCache.TryRemove(key, out _);
+    }
+
+    private void InvalidateReadCache(long telegramUserId)
+    {
+        foreach (var key in _readCache.Keys)
+            if (key.UserId == telegramUserId) _readCache.TryRemove(key, out _);
+    }
 
     public async Task<MoodleLinkResult> LinkAsync(long telegramUserId, string studentId, string password, CancellationToken cancellationToken)
     {
@@ -88,6 +130,7 @@ public sealed class MoodleBrowserService(
                 // independent so an authenticated session is not discarded because course
                 // discovery took too long.
                 await sessions.SaveAsync(telegramUserId, studentId, encrypted, cancellationToken);
+                InvalidateReadCache(telegramUserId);
                 stage = "initial-course-retrieval";
                 try { return await ReadCoursesOnPageAsync(page, timeout.Token); }
                 catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
@@ -171,11 +214,15 @@ public sealed class MoodleBrowserService(
             logger.LogInformation("Starting Moodle course retrieval; loading the authorized account's encrypted browser session.");
             var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
             if (stored is null) return new(MoodleLinkResultKind.Expired, [], false);
+            if (TryGetReadCache(stored, "courses", -1, out MoodleLinkResult? cached)) return cached!;
             logger.LogInformation("Encrypted Moodle session record was found.");
-            return await WithStoredSessionAsync<MoodleLinkResult>(stored, async page =>
+            var result = await WithStoredSessionAsync<MoodleLinkResult>(stored, async page =>
             {
                 return await ReadCoursesOnPageAsync(page, cancellationToken);
             }, cancellationToken);
+            if (result.Kind == MoodleLinkResultKind.Success && result.CoursesRetrieved)
+                StoreReadCache(stored, "courses", -1, result, CourseListCacheLifetime);
+            return result;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -195,7 +242,12 @@ public sealed class MoodleBrowserService(
             logger.LogInformation("Loading enrolled Moodle courses for assignment selection using the saved encrypted session.");
             var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
             if (stored is null) return new(MoodleAssignmentsResultKind.Expired, []);
-            return await WithStoredSessionAsync(stored, async page => await ReadAssignmentCoursesOnPageAsync(page, cancellationToken), cancellationToken);
+            if (TryGetReadCache(stored, "assignment-courses", -1, out MoodleAssignmentCourseListResult? cached)) return cached!;
+            var result = await WithStoredSessionAsync(stored, async page => await ReadAssignmentCoursesOnPageAsync(page, cancellationToken), cancellationToken);
+            if (result.Kind is MoodleAssignmentsResultKind.Success or MoodleAssignmentsResultKind.Partial)
+                StoreReadCache(stored, "assignment-courses", -1, result,
+                    result.Kind == MoodleAssignmentsResultKind.Success ? CourseListCacheLifetime : AssignmentCacheLifetime);
+            return result;
         }
         catch (System.Security.Cryptography.CryptographicException exception)
         {
@@ -219,7 +271,12 @@ public sealed class MoodleBrowserService(
         {
             var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
             if (stored is null) return new(MoodleQuizResultKind.Expired, [], 0, 0, 0, 0, 0, 0);
-            return await WithStoredSessionAsync(stored, async page => await ReadQuizzesAsync(page, selectedCourseId, cancellationToken), cancellationToken);
+            var courseKey = selectedCourseId ?? -1;
+            if (TryGetReadCache(stored, "quizzes", courseKey, out MoodleQuizResult? cached)) return cached!;
+            var result = await WithStoredSessionAsync(stored, async page => await ReadQuizzesAsync(page, selectedCourseId, cancellationToken), cancellationToken);
+            if (result.Kind is MoodleQuizResultKind.Success or MoodleQuizResultKind.Partial)
+                StoreReadCache(stored, "quizzes", courseKey, result, QuizCacheLifetime);
+            return result;
         }
         catch (System.Security.Cryptography.CryptographicException exception)
         {
@@ -403,6 +460,7 @@ public sealed class MoodleBrowserService(
         {
             var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
             if (stored is null) return new(false, "انتهت جلسة Moodle أو لم تعد موجودة. أرسل /link لإعادة الربط.");
+            InvalidateReadCache(telegramUserId);
             return await WithStoredSessionAsync<MoodleAssignmentSubmissionResult>(stored, async page =>
             {
                 if (!IsSafeAssignmentUrl(assignment.Url)) return new(false, "رابط الواجب غير صالح.");
@@ -501,7 +559,12 @@ public sealed class MoodleBrowserService(
             logger.LogInformation("Starting Moodle assignment retrieval using the saved encrypted session; selected course filter {SelectedCourseId}.", selectedCourseId);
             var stored = await sessions.GetAsync(telegramUserId, cancellationToken);
             if (stored is null) return new(MoodleAssignmentsResultKind.Expired, []);
-            return await WithStoredSessionAsync(stored, async page => await ReadAssignmentsOnPageAsync(page, cancellationToken, selectedCourseId), cancellationToken);
+            var courseKey = selectedCourseId ?? -1;
+            if (TryGetReadCache(stored, "assignments", courseKey, out MoodleAssignmentsResult? cached)) return cached!;
+            var result = await WithStoredSessionAsync(stored, async page => await ReadAssignmentsOnPageAsync(page, cancellationToken, selectedCourseId), cancellationToken);
+            if (result.Kind is MoodleAssignmentsResultKind.Success or MoodleAssignmentsResultKind.Partial)
+                StoreReadCache(stored, "assignments", courseKey, result, AssignmentCacheLifetime);
+            return result;
         }
         catch (System.Security.Cryptography.CryptographicException exception)
         {
